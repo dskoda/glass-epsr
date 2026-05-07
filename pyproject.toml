@@ -16,9 +16,7 @@ dependencies = [
     "torch-geometric>=2.3",
     "scikit-learn>=1.2",
     "scipy>=1.10",
-    # `graphite` (LLNL) provides periodic_radius_graph and VarianceExplodingDiffuser.
-    # Not on PyPI; install from git:
-    "graphite @ git+https://github.com/LLNL/graphite.git",
+    "DebyeCalculator",
 ]
 
 [project.optional-dependencies]
@@ -27,11 +25,6 @@ plot = [
     "matplotlib>=3.6",
     "seaborn>=0.12",
     "tensorboard>=2.12",
-]
-# XRD/ND guidance and `write_spec_feature` use DebyeCalculator, which pins
-# Python <3.12. Kept as an extra so the rest of the package installs freely.
-diffraction = [
-    "DebyeCalculator",
 ]
 
 [project.scripts]

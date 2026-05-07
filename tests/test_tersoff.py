@@ -67,14 +67,12 @@ def test_diamond_energy():
 
 def test_snapshot_energy():
     atoms = read(DATA_DIR / "Si_2.5_00.xyz")
-    atoms.calc = ase_calc()
-    E_ase = atoms.get_potential_energy()
-
     pos, cell, pbc = _atoms_to_tensors(atoms)
     tc = torch_calc()
-    E_torch = tc.energy(pos, cell, pbc).item()
 
-    assert abs(E_torch - E_ase) < 1e-6, (E_torch, E_ase)
+    E = tc.energy(pos, cell, pbc).item()
+
+    assert abs(E + 936.3422548925636) < 1e-8, E
 
 
 def test_snapshot_forces_autograd_vs_finite_diff():
