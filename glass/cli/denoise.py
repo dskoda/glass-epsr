@@ -3,6 +3,7 @@ import os
 
 import click
 import torch
+from tqdm import tqdm
 
 from glass.lit.datamodules import StructureSpecDataModule
 from glass.lit.modules import LitScoreNet
@@ -27,7 +28,7 @@ EXAMPLES:
       --score-model-path /path/to/demo_Si/Si_score_1.5_2.5_3.5.ckpt \\
       --init-path /path/to/reference/start_Si_216/Si_01.xyz
 
-  # Directory input (loads all Si_*.xyz inside)
+  # Directory input (loads all *.xyz files inside)
   glass uncond_denoise --score-model 1.5_2.5_3.5 --system Si \\
       --score-data-path /path/to/score_models \\
       --score-model-path /path/to/demo_Si/Si_score_1.5_2.5_3.5.ckpt \\
@@ -70,7 +71,7 @@ EXAMPLES:
     "--init-path",
     type=str,
     required=True,
-    help="Initial structures: a .xyz file, a glob pattern, or a directory (all {system}_*.xyz inside).",
+    help="Initial structures: a .xyz file, a glob pattern, or a directory (all *.xyz files inside).",
 )
 @click.option(
     "--outdir",
@@ -170,13 +171,14 @@ def uncond_denoise(
         edge_attr = torch.hstack([edge_vec, edge_vec.norm(dim=-1, keepdim=True)])
         return score_net.ema_model(species, edge_index, edge_attr, t, diffuser.sigma(t))
 
-    def _denoise_by_sde(species, pos, cell, cut, score_fn, ts, diffuser, save_traj):
+    def _denoise_by_sde(species, pos, cell, cut, score_fn, ts, diffuser, save_traj, desc="Denoising"):
         ts = ts.to(pos.device).view(-1, 1)
         f, g, g2 = diffuser.f, diffuser.g, diffuser.g2
         traj = [pos.detach().cpu().clone()] if save_traj else None
         pos = pos.detach()
 
-        for i, t in enumerate(ts[1:]):
+        # Use tqdm for progress bar, skip first timestep (already stored in traj)
+        for i, t in enumerate(tqdm(ts[1:], desc=desc, unit="step", leave=False)):
             dt = ts[i + 1] - ts[i]
             eps = dt.abs().sqrt() * torch.randn_like(pos)
             score = score_fn(species, pos, cell, t, cut)
@@ -230,7 +232,7 @@ def uncond_denoise(
             xyz_files = [resolved_init_path]
         elif os.path.isdir(resolved_init_path):
             xyz_files = sorted(
-                glob.glob(os.path.join(resolved_init_path, f"{system}_*.xyz"))
+                glob.glob(os.path.join(resolved_init_path, "*.xyz"))
             )
         else:
             xyz_files = sorted(glob.glob(resolved_init_path))  # treat as glob pattern

@@ -20,6 +20,7 @@ def glass():
 
 from glass.cli.train import train_score, train_spec
 from glass.cli.denoise import uncond_denoise, cond_denoise
+from glass.cli.initialize import initialize
 from glass.cli.analysis import (
     plot_loss,
     write_spec_feature,
@@ -32,6 +33,7 @@ glass.add_command(train_spec)
 glass.add_command(plot_loss)
 glass.add_command(uncond_denoise)
 glass.add_command(cond_denoise)
+glass.add_command(initialize)
 glass.add_command(write_spec_feature)
 glass.add_command(calc_metrics)
 glass.add_command(build_ref_stats)
