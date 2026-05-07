@@ -7,10 +7,9 @@ from typing import List, Tuple, Optional
 
 ####################### Model #######################
 
-import sys
 from torch import nn
-from graphite.nn import MLP
-from graphite.nn.basis import GaussianRandomFourierFeatures
+from glass.nn import MLP
+from glass.nn.basis import GaussianRandomFourierFeatures
 
 
 class Encoder_dpm(nn.Module):
@@ -65,7 +64,7 @@ class ScoreModel(nn.Module):
 ####################### LightningModule #######################
 
 import lightning as L
-from graphite.nn.models.mgn import Processor, Decoder
+from glass.nn.mgn import Processor, Decoder
 
 
 class LitScoreNet(L.LightningModule):

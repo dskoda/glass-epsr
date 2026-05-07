@@ -7,9 +7,8 @@ from typing import List, Tuple, Optional
 
 ####################### Model #######################
 
-import sys
 from torch import nn
-from graphite.nn import MLP
+from glass.nn import MLP
 from torch_geometric.nn import global_mean_pool
 
 
@@ -67,7 +66,7 @@ class MeshGraphNets(nn.Module):
 ####################### LightningModule #######################
 
 import lightning as L
-from graphite.nn.models.mgn import Processor
+from glass.nn.mgn import Processor
 
 
 class LitSpecNet(L.LightningModule):

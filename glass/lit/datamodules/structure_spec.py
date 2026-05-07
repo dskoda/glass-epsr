@@ -1,4 +1,4 @@
-import torch, sys
+import torch
 import numpy as np
 import lightning.pytorch as pl
 
@@ -10,9 +10,8 @@ from torch_geometric.data import Data, Dataset
 from sklearn.preprocessing import OneHotEncoder
 from scipy.spatial.transform import Rotation
 
-sys.path.insert(0, "/home/jwguo/packages/graphite/src/")
-from graphite.nn import periodic_radius_graph
-from graphite.diffusion import VarianceExplodingDiffuser
+from glass.nn import periodic_radius_graph
+from glass.diffusion import VarianceExplodingDiffuser
 
 
 class StructureSpecDataset(Dataset):
