@@ -13,8 +13,8 @@ from ase.io import read
 import numpy as np
 import torch
 
-from torch_tersoff import TersoffParameters, TorchTersoff
-from torch_tersoff.neighbors import build_neighbors
+from glass.potentials.torch_tersoff import TersoffParameters, TorchTersoff
+from glass.potentials.torch_tersoff.neighbors import build_neighbors
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 

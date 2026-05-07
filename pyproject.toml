@@ -1,33 +1,45 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=42"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "torch-tersoff"
+name = "glass"
 version = "0.1.0"
-description = "PyTorch reimplementation of the LAMMPS-style Tersoff potential with an ASE calculator and MD CLI."
-readme = "README.md"
+description = "Generative learning for atomic structure reconstruction, with a PyTorch Tersoff potential for Si."
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [
-    { name = "Daniel Schwalbe-Koda" },
-]
 dependencies = [
     "ase>=3.23",
     "click>=8",
     "numpy>=1.23",
     "torch>=2.0",
+    "lightning>=2.0",
+    "torch-geometric>=2.3",
+    "scikit-learn>=1.2",
+    "scipy>=1.10",
+    # `graphite` (LLNL) provides periodic_radius_graph and VarianceExplodingDiffuser.
+    # Not on PyPI; install from git:
+    "graphite @ git+https://github.com/LLNL/graphite.git",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+plot = [
+    "matplotlib>=3.6",
+    "seaborn>=0.12",
+    "tensorboard>=2.12",
+]
+# XRD/ND guidance and `write_spec_feature` use DebyeCalculator, which pins
+# Python <3.12. Kept as an extra so the rest of the package installs freely.
+diffraction = [
+    "DebyeCalculator",
+]
 
 [project.scripts]
-torch-tersoff = "torch_tersoff.cli:main"
+glass = "glass.cli:glass"
 
 [tool.setuptools.packages.find]
-include = ["torch_tersoff*"]
-exclude = ["tests*"]
+where = ["."]
+include = ["glass*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

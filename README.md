@@ -1,106 +1,348 @@
-# torch-tersoff
+# GLASS — Generative Learning for Atomic Structure Simulation
 
-A PyTorch reimplementation of the LAMMPS-style Tersoff interatomic potential,
-with an ASE `Calculator` wrapper and a small CLI for running molecular
-dynamics.
+GLASS is a CLI tool for training and running score-based generative models for atomic glass structures, with support for unconditional and guided (conditional) denoising using structural and spectral observables.
 
-Energies are computed in PyTorch (float64 by default); forces are obtained via
-`torch.autograd.grad` on the positions, so they are the exact analytical
-gradient of the energy expression.
+---
 
-## Install
+## Installation
 
 ```bash
+git clone git@github.com:digital-synthesis-lab/GLASS.git
+cd GLASS
 pip install -e .
 ```
 
-Runtime dependencies: `torch`, `ase`, `numpy`, `click`.
+After installation, the `glass` command is available in your terminal.
 
-On macOS you may need `KMP_DUPLICATE_LIB_OK=TRUE` when mixing PyTorch and
-SciPy-backed ASE in the same process. The CLI and the test file set this
-automatically; you only need to set it explicitly for ad-hoc Python scripts.
+**Dependencies** (must be installed separately):
+- `torch`, `lightning`
+- `ase`
+- `scikit-learn`
+- `graphite` (provides `graphite.nn.periodic_radius_graph`)
+- `debyecalculator` (for XRD/ND in `write_spec_feature`)
+- `tensorboard`, `matplotlib`, `seaborn` (for `plot_loss`)
 
-## Python API
+---
 
-```python
-from ase.build import bulk
-from torch_tersoff import TorchTersoffCalculator, TersoffParameters
+## Expected Data Layout
 
-si_params = {
-    ("Si", "Si", "Si"): TersoffParameters(
-        A=3264.7, B=95.373,
-        lambda1=3.2394, lambda2=1.3258, lambda3=1.3258,
-        beta=0.33675, gamma=1.0, m=3.0, n=22.956,
-        c=4.8381, d=2.0417, h=0.0,
-        R=3.0, D=0.2,
-    )
-}
+```
+data/
+  <sample_tag>/
+    structures/
+      train/
+        *.xyz
+    exafs/
+      train/
+        *.txt        # one row per atom
+    xanes/
+      train/
+        *.txt        # one row per atom
 
-atoms = bulk("Si", "diamond", a=5.43)
-atoms.calc = TorchTersoffCalculator(si_params)
+models/
+  pre_trained/
+    <system>_<score_model>/
+      model.ckpt     # best checkpoint
 
-print(atoms.get_potential_energy())
-print(atoms.get_forces())
+reference/
+  amorph_<system>_216/
+    <system>_*.xyz   # reference amorphous structures
+
+  start_<system>_216/
+    <system>_*.xyz   # initial (noisy) structures for denoising
 ```
 
-A pre-parameterized Si calculator is also available:
+---
 
-```python
-from torch_tersoff import silicon_calculator
-atoms.calc = silicon_calculator()
-```
+## Commands
 
-## Command line
+### `train_score` — Train a score model
 
-After installing, the `torch-tersoff` command is available:
+Trains a score-based generative model on atomic structures.
 
 ```bash
-# Single-point energy and max |force|
-torch-tersoff energy tests/data/Si_2.5_00.xyz
-
-# NVE MD, 100 steps of 1 fs, 300 K initial temperature
-torch-tersoff md --input tests/data/Si_2.5_00.xyz \
-    --ensemble nve --timestep 1.0 --steps 100 \
-    --temperature 300 --output md.traj
-
-# NVT (Langevin) MD
-torch-tersoff md --input tests/data/Si_2.5_00.xyz \
-    --ensemble nvt --timestep 1.0 --steps 1000 \
-    --temperature 1000 --friction 0.01 --output md.traj
+glass train_score Si_1.5_2.5_3.5 \
+    --num-species 1 \
+    --data-root ./data
 ```
 
-The CLI uses `ase.md.verlet.VelocityVerlet` (NVE) or `ase.md.langevin.Langevin`
-(NVT) under the hood, with the PyTorch Tersoff calculator attached to the
-`Atoms` object.
-
-## Tests
+Resume from the latest checkpoint:
 
 ```bash
-pip install -e ".[test]"
-pytest
+glass train_score Si_1.5_2.5_3.5 \
+    --num-species 1 \
+    --data-root ./data \
+    --resume
 ```
 
-The suite (6 tests, runs in a few seconds) checks:
+Key options:
 
-- Energy agreement with `ase.calculators.tersoff.Tersoff` on a Si diamond
-  cell and on a 216-atom disordered Si snapshot.
-- Autograd forces against a central finite-difference of our own torch
-  energy on a random subset of atoms. See the note below on why we do not
-  compare against ASE's analytical forces.
-- Internal consistency between our autograd and analytical force paths.
-- Translation invariance of the energy.
-- Neighbor-list sanity (four nearest neighbors in diamond Si).
+| Option | Default | Description |
+|---|---|---|
+| `--num-species` | required | Number of atomic species |
+| `--cutoff` | 5.0 | Graph cutoff radius (Å) |
+| `--k` | 0.8 | Maximum noise level |
+| `--max-epochs` | 12000 | Training epochs |
+| `--data-root` | `./data` | Root data directory |
+| `--save-dir` | `./models/` | Checkpoint output directory |
+| `--resume` | — | Resume from latest checkpoint |
 
-## Notes
+Checkpoints are saved to `./models/<sample_tag>/version_*/checkpoints/`.
 
-- Only single-species, homogeneous `(A, A, A)` parameter keys are supported
-  in the current version. The API mirrors ASE's Tersoff so multi-species can
-  be added later.
-- The neighbor list is torch-native and assumes orthorhombic cells.
-- The installed `ase.calculators.tersoff` (3.25.0) computes the bond-order
-  exponential as `arg = lambda3 * (r_ij - r_ik)**m`; this package matches
-  that energy. ASE's own **analytical** forces are inconsistent with that
-  energy (the derivative code was not updated), so `Atoms.get_forces()` from
-  ASE disagrees with ASE's numerical derivative of its own energy by up to
-  ~7 eV/Å on the disordered snapshot. Torch autograd here is the correct
-  gradient.
+---
+
+### `train_spec` — Train EXAFS or XANES surrogate model
+
+Trains a per-atom spectral surrogate model used for spectral guidance.
+
+```bash
+# Train EXAFS
+glass train_spec xas_train \
+    --spec-type exafs \
+    --num-species 1 \
+    --out-dim 400 \
+    --data-root ./data
+
+# Train XANES
+glass train_spec xas_train \
+    --spec-type xanes \
+    --num-species 1 \
+    --out-dim 100 \
+    --data-root ./data
+
+# Resume
+glass train_spec xas_train \
+    --spec-type exafs --num-species 1 \
+    --data-root ./data --resume
+```
+
+Key options:
+
+| Option | Default | Description |
+|---|---|---|
+| `--spec-type` | required | `exafs` or `xanes` |
+| `--num-species` | required | Number of atomic species |
+| `--out-dim` | 400 (exafs) / 100 (xanes) | Output dimension |
+| `--max-epochs` | 8000 (exafs) / 3000 (xanes) | Training epochs |
+| `--data-root` | `./data` | Root data directory |
+| `--save-dir` | `./models/` | Checkpoint output directory |
+| `--resume` | — | Resume from latest checkpoint |
+
+Checkpoints are saved to `./models/<sample_tag>_<spec_type>/version_*/checkpoints/`.
+
+---
+
+### `plot_loss` — Plot training loss curves
+
+```bash
+glass plot_loss ./models/pre_trained --output score_loss.pdf
+```
+
+Options:
+
+| Option | Default | Description |
+|---|---|---|
+| `--output` | `score_LC_all.pdf` | Output PDF filename |
+| `--ylim` | `0.2 3.2` | Y-axis range |
+| `--model` | all | Filter specific model(s) |
+
+---
+
+### `uncond_denoise` — Unconditional denoising
+
+Runs denoising trajectories without any experimental guidance.
+
+```bash
+glass uncond_denoise \
+    --score-model "1.5_2.5_3.5" \
+    --system Si \
+    --score-data-path "./data/{system}_{score_model}" \
+    --score-model-path "./models/pre_trained/{system}_{score_model}/model.ckpt" \
+    --init-path "./reference/start_Si_216/Si_2.0_*.xyz" \
+    --device cuda:0 \
+    --n-runs 10
+```
+
+`--init-path` accepts a single `.xyz` file, a glob pattern, or a directory.
+
+Key options:
+
+| Option | Default | Description |
+|---|---|---|
+| `--score-model` | required | Score model tag(s), repeatable |
+| `--system` | `Si` | System name |
+| `--device` | `cuda:0` | Torch device |
+| `--n-runs` | 10 | Independent runs per structure |
+| `--tmax` | 1.0 | Reverse SDE end time |
+| `--tstep` | 256 | Number of SDE steps |
+| `--save-traj/--no-save-traj` | save | Save full trajectory or final frame only |
+
+Output is written to `denoise_logs/unconditional/<system>-<model>/<struct_id>/`.
+
+---
+
+### `cond_denoise` — Conditional (guided) denoising
+
+Runs denoising with experimental or computational guidance. Supports 6 guidance types:
+
+| Type | Observable | Notes |
+|---|---|---|
+| `pdf` | Pair distribution function | CPU-based |
+| `adf` | Angular distribution function | CPU-based |
+| `xrd` | X-ray diffraction I(q) | GPU-accelerated |
+| `nd` | Neutron diffraction I(q) | GPU-accelerated |
+| `exafs` | EXAFS spectrum | Requires `--spec-model-path` |
+| `xanes` | XANES spectrum | Requires `--spec-model-path` |
+
+**PDF guidance (computational reference):**
+
+```bash
+glass cond_denoise \
+    --score-model "1.5_2.5_3.5" --system Si \
+    --score-data-path "./data/{system}_{score_model}" \
+    --score-model-path "./models/pre_trained/{system}_{score_model}/model.ckpt" \
+    --init-path "./reference/start_Si_216/Si_2.0_*.xyz" \
+    --ref-path ./reference/amorph_Si_216 \
+    --guidance-type pdf --rho 1000 \
+    --device cuda:0 --n-runs 10 --no-save-traj
+```
+
+**PDF guidance (experimental data):**
+
+```bash
+glass cond_denoise \
+    --score-model "1.5_2.5_3.5" --system Si \
+    --score-data-path "./data/{system}_{score_model}" \
+    --score-model-path "./models/pre_trained/{system}_{score_model}/model.ckpt" \
+    --init-path "./reference/start_Si_216/Si_2.0_*.xyz" \
+    --exp-data ./data/exp_gr_si.json \
+    --guidance-type pdf --rho 1000 \
+    --device cuda:0 --n-runs 10 --no-save-traj
+```
+
+**XRD guidance:**
+
+```bash
+glass cond_denoise \
+    --score-model "1.5_2.5_3.5" --system Si \
+    --score-data-path "./data/{system}_{score_model}" \
+    --score-model-path "./models/pre_trained/{system}_{score_model}/model.ckpt" \
+    --init-path "./reference/start_Si_216/Si_2.0_*.xyz" \
+    --ref-path ./reference/amorph_Si_216 \
+    --guidance-type xrd --element-names Si --rho 5 \
+    --device cuda:0 --n-runs 10 --no-save-traj
+```
+
+**EXAFS/XANES guidance:**
+
+```bash
+glass cond_denoise \
+    --score-model "1.5_2.5_3.5" --system Si \
+    --score-data-path "./data/{system}_{score_model}" \
+    --score-model-path "./models/pre_trained/{system}_{score_model}/model.ckpt" \
+    --init-path "./reference/start_Si_216/Si_2.0_*.xyz" \
+    --ref-path ./reference/amorph_Si_216 \
+    --guidance-type exafs --spec-model-path ./models/Si_exafs.ckpt --rho 1e8 \
+    --device cuda:0 --n-runs 10 --no-save-traj
+```
+
+Key options:
+
+| Option | Default | Description |
+|---|---|---|
+| `--guidance-type` | `pdf` | One of: `pdf`, `adf`, `xrd`, `nd`, `exafs`, `xanes` |
+| `--rho` | 1000 | Guidance strength (repeatable for sweep) |
+| `--ref-path` | — | Directory of reference `.xyz` files |
+| `--exp-data` | — | JSON file with experimental `{x, y}` data |
+| `--element-names` | — | Required for `xrd`/`nd` |
+| `--spec-model-path` | — | Required for `exafs`/`xanes` |
+| `--bin-size` | 100 | PDF bins |
+| `--adf-cutoff` | 3.5 | ADF triplet cutoff (Å) |
+| `--qmin/--qmax/--qstep` | 1.0/20.0/0.1 | q-range for XRD/ND |
+
+Output is written to `denoise_logs/guided/<system>-<model>/<struct_id>/<guidance_type>_rho<rho>_tmax<tmax>_nsteps<tstep>/`.
+
+---
+
+### `write_spec_feature` — Compute spectral features
+
+Computes PDF, ADF, XRD, ND, EXAFS, and XANES for denoised or reference structures and writes them to a JSON file.
+
+```bash
+# Denoised structures
+glass write_spec_feature \
+    --system Si \
+    --denoise-tag "unconditional/Si-1.5_2.5_3.5" \
+    --exafs-model ./models/Si_exafs.ckpt \
+    --xanes-model ./models/Si_xanes.ckpt \
+    --outdir results
+
+# Reference structures
+glass write_spec_feature --mode reference \
+    --system Si \
+    --atoms-path ./reference/amorph_Si_216 \
+    --exafs-model ./models/Si_exafs.ckpt \
+    --xanes-model ./models/Si_xanes.ckpt \
+    --outdir results
+```
+
+---
+
+### `build_ref_stats` — Build reference statistics
+
+Computes mean spectra, diversity, and normalization factors from the reference JSON.
+
+```bash
+glass build_ref_stats \
+    --input results/reference_Si_spectra.json \
+    --system Si \
+    --atoms-path ./reference/amorph_Si_216 \
+    --outdir final_data_dir
+```
+
+Output: `final_data_dir/a-<system>_ref_stats.json`
+
+---
+
+### `calc_metrics` — Compute error and diversity metrics
+
+Compares denoised spectra against the reference master stats.
+
+```bash
+glass calc_metrics \
+    --denoise-json results/denoise_Si_unconditional_Si-1.5_2.5_3.5_spectra.json \
+    --ref-master-json final_data_dir/a-Si_ref_stats.json \
+    --system Si \
+    --denoise-label "1.5_2.5_3.5" \
+    --ref-label 1.5 --ref-label 2.0 --ref-label 2.5 --ref-label 3.0 --ref-label 3.5 \
+    --outdir final_data_dir
+```
+
+---
+
+## Typical Workflow
+
+```
+1. train_score          → train the denoising score model
+2. train_spec           → train EXAFS and XANES surrogate models
+3. uncond_denoise       → run unconditional denoising
+   cond_denoise         → run guided denoising (any guidance type)
+4. write_spec_feature   → compute spectra for denoised + reference structures
+5. build_ref_stats      → compute reference statistics
+6. calc_metrics         → evaluate error and diversity
+```
+
+See `submit.sh` for a complete set of example commands for the Si system.
+
+---
+
+## Multi-GPU Training
+
+Use `CUDA_VISIBLE_DEVICES` to select GPUs:
+
+```bash
+export CUDA_VISIBLE_DEVICES=1,2,3
+glass train_score Si_1.5_2.5_3.5 --num-species 1 --device cuda:0
+```
+
+The default strategy (`ddp_find_unused_parameters_true`) supports multi-GPU via PyTorch Lightning.
