@@ -43,6 +43,13 @@ class StructureSpecDataset(Dataset):
         if not self.X_fnames:
             self.X_fnames = sorted(Path(data_dir).glob("*.xyz"))
 
+        if not self.X_fnames:
+            raise FileNotFoundError(
+                f"No .xyz files found in '{data_dir}'. "
+                f"Searched: structures/train/*.xyz, structures/*.xyz, *.xyz. "
+                f"Please ensure your data is in one of these locations."
+            )
+
         atoms_list = [ase.io.read(f) for f in self.X_fnames]
 
         if guide_type is not None:

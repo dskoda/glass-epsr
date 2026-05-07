@@ -1,3 +1,14 @@
+# Fix for macOS multiprocessing issue with PyTorch Lightning
+# Python 3.8+ on macOS uses 'spawn' by default which doesn't work well with
+# complex dataset objects. We use 'fork' which is more compatible.
+import platform
+import multiprocessing
+if platform.system() == "Darwin":  # macOS
+    try:
+        multiprocessing.set_start_method("fork", force=True)
+    except RuntimeError:
+        pass  # Already set, ignore
+
 import click
 
 

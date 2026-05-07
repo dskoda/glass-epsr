@@ -17,6 +17,7 @@ dependencies = [
     "scikit-learn>=1.2",
     "scipy>=1.10",
     "DebyeCalculator",
+    "tensorboard",
 ]
 
 [project.optional-dependencies]
