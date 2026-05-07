@@ -23,21 +23,21 @@ EXAMPLES:
 
   # Single model, single file
   glass uncond_denoise --score-model 1.5_2.5_3.5 --system Si \\
-      --score-data-path /home/jwguo/03_denoiser/00_score_models \\
-      --score-model-path /home/jwguo/03_denoiser/demo_Si/Si_score_1.5_2.5_3.5.ckpt \\
-      --init-path /home/jwguo/03_denoiser/reference/start_Si_216/Si_01.xyz
+      --score-data-path /path/to/score_models \\
+      --score-model-path /path/to/demo_Si/Si_score_1.5_2.5_3.5.ckpt \\
+      --init-path /path/to/reference/start_Si_216/Si_01.xyz
 
   # Directory input (loads all Si_*.xyz inside)
   glass uncond_denoise --score-model 1.5_2.5_3.5 --system Si \\
-      --score-data-path /home/jwguo/03_denoiser/00_score_models \\
-      --score-model-path /home/jwguo/03_denoiser/demo_Si/Si_score_1.5_2.5_3.5.ckpt \\
-      --init-path /home/jwguo/03_denoiser/reference/start_Si_216
+      --score-data-path /path/to/score_models \\
+      --score-model-path /path/to/demo_Si/Si_score_1.5_2.5_3.5.ckpt \\
+      --init-path /path/to/reference/start_Si_216
 
   # Glob pattern input
   glass uncond_denoise --score-model 1.5_2.5_3.5 --system Si \\
-      --score-data-path /home/jwguo/03_denoiser/00_score_models \\
-      --score-model-path /home/jwguo/03_denoiser/demo_Si/Si_score_1.5_2.5_3.5.ckpt \\
-      --init-path "/home/jwguo/03_denoiser/reference/start_Si_216/Si_0[1-3].xyz"
+      --score-data-path /path/to/score_models \\
+      --score-model-path /path/to/demo_Si/Si_score_1.5_2.5_3.5.ckpt \\
+      --init-path "/path/to/reference/start_Si_216/Si_0[1-3].xyz"
 """,
 )
 @click.option(
@@ -316,8 +316,8 @@ EXAMPLES:
       --score-model "1.5_2.5_3.5" --system Si \\
       --score-data-path "./data/{system}_{score_model}" \\
       --score-model-path "./models/pre_trained/{system}_{score_model}/model.ckpt" \\
-      --init-path "/home/jwguo/03_denoiser/reference/start_{system}_216/{system}_2.0_*.xyz" \\
-      --ref-path /home/jwguo/03_denoiser/reference/amorph_Si_216 \\
+      --init-path "/path/to/reference/start_{system}_216/{system}_2.0_*.xyz" \\
+      --ref-path /path/to/reference/amorph_Si_216 \\
       --guidance-type pdf --rho 1000 --device cuda:0 --n-runs 10
 
   # XRD guidance
@@ -325,8 +325,8 @@ EXAMPLES:
       --score-model "1.5_2.5_3.5" --system Si \\
       --score-data-path "./data/{system}_{score_model}" \\
       --score-model-path "./models/pre_trained/{system}_{score_model}/model.ckpt" \\
-      --init-path "/home/jwguo/03_denoiser/reference/start_{system}_216/{system}_2.0_*.xyz" \\
-      --ref-path /home/jwguo/03_denoiser/reference/amorph_Si_216 \\
+      --init-path "/path/to/reference/start_{system}_216/{system}_2.0_*.xyz" \\
+      --ref-path /path/to/reference/amorph_Si_216 \\
       --guidance-type xrd --element-names Si --rho 5 --device cuda:0
 
   # EXAFS/XANES guidance
@@ -334,8 +334,8 @@ EXAMPLES:
       --score-model "1.5_2.5_3.5" --system Si \\
       --score-data-path "./data/{system}_{score_model}" \\
       --score-model-path "./models/pre_trained/{system}_{score_model}/model.ckpt" \\
-      --init-path "/home/jwguo/03_denoiser/reference/start_{system}_216/{system}_2.0_*.xyz" \\
-      --ref-path /home/jwguo/03_denoiser/reference/amorph_Si_216 \\
+      --init-path "/path/to/reference/start_{system}_216/{system}_2.0_*.xyz" \\
+      --ref-path /path/to/reference/amorph_Si_216 \\
       --guidance-type exafs --spec-model-path ./models/Si_exafs.ckpt --rho 1e8 --device cuda:0
 
   # PDF guidance (experimental data)
@@ -343,7 +343,7 @@ EXAMPLES:
       --score-model "1.5_2.5_3.5" --system Si \\
       --score-data-path "./data/{system}_{score_model}" \\
       --score-model-path "./models/pre_trained/{system}_{score_model}/model.ckpt" \\
-      --init-path "/home/jwguo/03_denoiser/reference/start_{system}_216/{system}_2.0_*.xyz" \\
+      --init-path "/path/to/reference/start_{system}_216/{system}_2.0_*.xyz" \\
       --exp-data ./data/exp_gr_si.json \\
       --guidance-type pdf --rho 1000 --device cuda:0
 """,

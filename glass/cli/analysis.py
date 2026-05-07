@@ -19,7 +19,7 @@ EXAMPLES:
   glass plot_loss
 
   # Plot models in a specific directory
-  glass plot_loss /home/jwguo/03_denoiser/demo_Si/models
+  glass plot_loss /path/to/demo_Si/models
 
   # Custom output file and y-axis range
   glass plot_loss --output my_plot.pdf --ylim 0.1 2.0
@@ -156,7 +156,7 @@ EXAMPLES:
 
   # Reference mode
   glass write_spec_feature --mode reference --system Si \\
-      --atoms-path /home/jwguo/03_denoiser/reference/amorph_Si_216 \\
+      --atoms-path /path/to/reference/amorph_Si_216 \\
       --exafs-model ./models/Si_exafs.ckpt \\
       --xanes-model ./models/Si_xanes.ckpt \\
       --outdir results/reference
@@ -708,7 +708,7 @@ EXAMPLES:
   glass build_ref_stats \\
       --input results/reference_Si_spectra.json \\
       --system Si \\
-      --atoms-path /home/jwguo/03_denoiser/reference/amorph_Si_216 \\
+      --atoms-path /path/to/reference/amorph_Si_216 \\
       --outdir final_data_dir
 
   # Custom grouping (e.g. by temperature instead of density)

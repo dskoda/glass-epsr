@@ -27,15 +27,15 @@ CHECKPOINTS:
 EXAMPLES:
 
   # Train from scratch (recommended defaults)
-  glass train_score Si_1.5_2.5_3.5 --num-species 2 --data-root /home/jwguo/03_denoiser/demo_Si/data
+  glass train_score Si_1.5_2.5_3.5 --num-species 2 --data-root /path/to/demo_Si/data
 
   # Resume from latest checkpoint
-  glass train_score Si_1.5_2.5_3.5 --num-species 2 --data-root /home/jwguo/03_denoiser/demo_Si/data --resume
+  glass train_score Si_1.5_2.5_3.5 --num-species 2 --data-root /path/to/demo_Si/data --resume
 
   # Full control example
   glass train_score Si_1.5_2.5_3.5 \\
       --num-species 2 \\
-      --data-root /home/jwguo/03_denoiser/demo_Si/data \\
+      --data-root /path/to/demo_Si/data \\
       --max-epochs 12000 \\
       --cutoff 5 \\
       --k 0.8 \\
@@ -277,7 +277,7 @@ EXAMPLES:
 
   # Multi-species EXAFS
   glass train_spec ZrNiAl_exafs --spec-type exafs --num-species 3 --out-dim 400 \\
-      --data-root /home/jwguo/03_denoiser/demo_Si/data --max-epochs 8000
+      --data-root /path/to/demo_Si/data --max-epochs 8000
 """,
 )
 @click.argument("sample_tag", type=str)
