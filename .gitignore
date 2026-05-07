@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+results/
+final_data_dir/
+lightning_logs/
+.DS_Store
+*.log

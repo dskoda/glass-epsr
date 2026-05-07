@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch-tersoff"
+version = "0.1.0"
+description = "PyTorch reimplementation of the LAMMPS-style Tersoff potential with an ASE calculator and MD CLI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Daniel Schwalbe-Koda" },
+]
+dependencies = [
+    "ase>=3.23",
+    "click>=8",
+    "numpy>=1.23",
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+torch-tersoff = "torch_tersoff.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["torch_tersoff*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

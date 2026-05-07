@@ -1,0 +1,323 @@
+import math
+
+import torch
+
+from .neighbors import build_neighbors
+from .params import TersoffParameters
+
+# Matches the guards in ase.calculators.tersoff
+_MAX_EXP_ARG = 69.0776
+_MIN_EXP_ARG = -69.0776
+
+
+class TorchTersoff:
+    """PyTorch reimplementation of the LAMMPS-style Tersoff potential.
+
+    Single-species only. API mirrors ase.calculators.tersoff.Tersoff:
+    parameters keyed by (elem, elem, elem) -> TersoffParameters.
+    """
+
+    def __init__(self, parameters: dict, dtype: torch.dtype = torch.float64):
+        if len(parameters) != 1:
+            raise NotImplementedError("Only single-species parameter sets supported.")
+        self.key = next(iter(parameters.keys()))
+        if not (self.key[0] == self.key[1] == self.key[2]):
+            raise NotImplementedError("Only homogeneous (A,A,A) keys supported.")
+        self.params: TersoffParameters = parameters[self.key]
+        self.dtype = dtype
+
+    # ------------------------------------------------------------------
+    # Building blocks
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _fc(r: torch.Tensor, R: float, D: float) -> torch.Tensor:
+        out = torch.where(
+            r < R - D,
+            torch.ones_like(r),
+            0.5 * (1.0 - torch.sin(math.pi * (r - R) / (2.0 * D))),
+        )
+        out = torch.where(r > R + D, torch.zeros_like(r), out)
+        return out
+
+    @staticmethod
+    def _fc_d(r: torch.Tensor, R: float, D: float) -> torch.Tensor:
+        inside = (r > R - D) & (r < R + D)
+        val = -0.25 * math.pi / D * torch.cos(math.pi * (r - R) / (2.0 * D))
+        return torch.where(inside, val, torch.zeros_like(r))
+
+    @staticmethod
+    def _gijk(costheta: torch.Tensor, p: TersoffParameters) -> torch.Tensor:
+        c2 = p.c * p.c
+        d2 = p.d * p.d
+        hcth = p.h - costheta
+        return p.gamma * (1.0 + c2 / d2 - c2 / (d2 + hcth * hcth))
+
+    @staticmethod
+    def _gijk_d(costheta: torch.Tensor, p: TersoffParameters) -> torch.Tensor:
+        c2 = p.c * p.c
+        d2 = p.d * p.d
+        hcth = p.h - costheta
+        return (-2.0 * p.gamma * c2 * hcth) / (d2 + hcth * hcth) ** 2
+
+    @staticmethod
+    def _safe_exp(arg: torch.Tensor) -> torch.Tensor:
+        clamped = torch.clamp(arg, _MIN_EXP_ARG, _MAX_EXP_ARG)
+        out = torch.exp(clamped)
+        out = torch.where(arg > _MAX_EXP_ARG, torch.full_like(out, 1.0e30), out)
+        out = torch.where(arg < _MIN_EXP_ARG, torch.zeros_like(out), out)
+        return out
+
+    # ------------------------------------------------------------------
+    # Energy
+    # ------------------------------------------------------------------
+    def _energy_from_pairs(
+        self,
+        positions: torch.Tensor,
+        i_idx: torch.Tensor,
+        j_idx: torch.Tensor,
+        shift_vec: torch.Tensor,
+    ) -> torch.Tensor:
+        p = self.params
+
+        r_ij_vec = positions[j_idx] + shift_vec - positions[i_idx]  # (P, 3)
+        r_ij = torch.linalg.norm(r_ij_vec, dim=-1)  # (P,)
+
+        fc_ij = self._fc(r_ij, p.R, p.D)
+
+        # zeta_ij: for each pair p, sum over pairs q with same i_q == i_p, q != p.
+        # Dense (P, P) mask.
+        same_i = i_idx.unsqueeze(0) == i_idx.unsqueeze(1)  # (P, P): [pair, k-pair]
+        not_same_pair = ~torch.eye(
+            i_idx.shape[0], dtype=torch.bool, device=positions.device
+        )
+        triple_mask = same_i & not_same_pair  # (P, K)
+
+        # r_ik for every "k-pair"
+        r_ik_vec = r_ij_vec  # alias: pair q has r_{i_q, j_q}; we reuse
+        r_ik = r_ij
+
+        # Broadcast: for each pair p with vector r_ij_p (P,3), against all k r_ik_q (K,3)
+        # We want cos(theta) = (r_ij_p . r_ik_q) / (r_ij_p * r_ik_q)
+        # Shapes: r_ij_vec (P,3), r_ik_vec (K,3)
+        dot = r_ij_vec @ r_ik_vec.T  # (P, K)
+        norms = r_ij.unsqueeze(1) * r_ik.unsqueeze(0)  # (P, K)
+        costheta = dot / norms
+
+        fc_ik = self._fc(r_ik, p.R, p.D).unsqueeze(0).expand_as(dot)  # (P, K)
+        g_theta = self._gijk(costheta, p)
+
+        delta_r = r_ij.unsqueeze(1) - r_ik.unsqueeze(0)  # (P, K)
+        # Matches installed ase.calculators.tersoff: arg = lambda3 * (r_ij - r_ik)^m
+        arg = p.lambda3 * delta_r**p.m
+        ex_delr = self._safe_exp(arg)
+
+        term = fc_ik * g_theta * ex_delr
+        term = torch.where(triple_mask, term, torch.zeros_like(term))
+        zeta = term.sum(dim=1)  # (P,)
+
+        # bond order
+        tmp = p.beta * zeta
+        # Guard zeta == 0: tmp**n -> 0 for n positive non-integer when tmp=0,
+        # but tmp**(n-1) in analytical derivative would blow up. Handled there.
+        b_ij = (1.0 + tmp**p.n) ** (-1.0 / (2.0 * p.n))
+
+        repulsive = p.A * torch.exp(-p.lambda1 * r_ij)
+        attractive = -p.B * torch.exp(-p.lambda2 * r_ij)
+
+        V_ij = fc_ij * (repulsive + b_ij * attractive)  # (P,)
+        # Sum over directed pairs, multiply by 0.5 for the pair-double-counting.
+        return 0.5 * V_ij.sum()
+
+    def energy(
+        self,
+        positions: torch.Tensor,
+        cell: torch.Tensor,
+        pbc=(True, True, True),
+    ) -> torch.Tensor:
+        p = self.params
+        cutoff = p.R + p.D
+        i_idx, j_idx, shift_vec = build_neighbors(positions, cell, pbc, cutoff)
+        return self._energy_from_pairs(positions, i_idx, j_idx, shift_vec)
+
+    def energy_and_forces_autograd(
+        self,
+        positions: torch.Tensor,
+        cell: torch.Tensor,
+        pbc=(True, True, True),
+    ):
+        pos = positions.detach().clone().to(self.dtype).requires_grad_(True)
+        cell_t = cell.to(self.dtype)
+        E = self.energy(pos, cell_t, pbc)
+        (grad,) = torch.autograd.grad(E, pos)
+        return E.detach(), -grad.detach()
+
+    # ------------------------------------------------------------------
+    # Analytical forces (ported from ase.calculators.tersoff)
+    # ------------------------------------------------------------------
+    def energy_and_forces_analytical(
+        self,
+        positions: torch.Tensor,
+        cell: torch.Tensor,
+        pbc=(True, True, True),
+    ):
+        p = self.params
+        cutoff = p.R + p.D
+        pos = positions.to(self.dtype)
+        cell_t = cell.to(self.dtype)
+
+        i_all, j_all, s_all = build_neighbors(pos, cell_t, pbc, cutoff)
+        N = pos.shape[0]
+        forces = torch.zeros((N, 3), dtype=self.dtype, device=pos.device)
+        E_total = torch.zeros((), dtype=self.dtype, device=pos.device)
+
+        # Group pairs by i.
+        for i in range(N):
+            mask_i = i_all == i
+            j_idx = j_all[mask_i]
+            shifts = s_all[mask_i]
+            if j_idx.numel() == 0:
+                continue
+            vectors = pos[j_idx] + shifts - pos[i]  # (ni, 3)
+            distances = torch.linalg.norm(vectors, dim=-1)  # (ni,)
+
+            ni = j_idx.shape[0]
+            for jj in range(ni):
+                idx_j = int(j_idx[jj].item())
+                r_ij_vec = vectors[jj]
+                abs_rij = distances[jj]
+                rij_hat = r_ij_vec / abs_rij
+
+                fc_ij = self._fc(abs_rij, p.R, p.D)
+                if float(fc_ij) == 0.0:
+                    continue
+
+                # zeta_ij and its derivatives
+                zeta, dzeta_dri, dzeta_drj_all, dzeta_drk_all = self._zeta_and_deriv(
+                    jj, vectors, distances, p
+                )
+
+                b_ij = (1.0 + (p.beta * zeta) ** p.n) ** (-1.0 / (2.0 * p.n))
+                # derivative of b_ij wrt zeta (only if zeta>0)
+                if float(zeta) > 0.0:
+                    tmp = p.beta * zeta
+                    bij_d = (
+                        -0.5
+                        * (1.0 + tmp**p.n) ** (-1.0 - (1.0 / (2.0 * p.n)))
+                        * (p.beta * tmp ** (p.n - 1.0))
+                    )
+                else:
+                    bij_d = torch.zeros((), dtype=self.dtype, device=pos.device)
+
+                repulsive = p.A * torch.exp(-p.lambda1 * abs_rij)
+                attractive = -p.B * torch.exp(-p.lambda2 * abs_rij)
+
+                # Distribute pair energy 0.25 + 0.25 to atoms i, j (matches ASE).
+                E_total = E_total + 0.5 * fc_ij * (repulsive + b_ij * attractive)
+
+                dfc_ij = self._fc_d(abs_rij, p.R, p.D)
+                rep_deriv = -p.lambda1 * repulsive
+                att_deriv = -p.lambda2 * attractive
+
+                tmp_scalar = dfc_ij * (repulsive + b_ij * attractive)
+                tmp_scalar = tmp_scalar + fc_ij * (rep_deriv + b_ij * att_deriv)
+
+                # grad wrt position of atom j (radial part)
+                grad_j_radial = 0.5 * tmp_scalar * rij_hat
+                forces[i] = forces[i] + grad_j_radial
+                forces[idx_j] = forces[idx_j] - grad_j_radial
+
+                # three-body force contributions
+                for kk in range(ni):
+                    if kk == jj:
+                        continue
+                    idx_k = int(j_idx[kk].item())
+                    # dzeta contributions (already computed):
+                    dztdri = dzeta_dri[kk]
+                    dztdrj = dzeta_drj_all[kk]
+                    dztdrk = dzeta_drk_all[kk]
+
+                    gi = 0.5 * fc_ij * bij_d * dztdri * attractive
+                    gj = 0.5 * fc_ij * bij_d * dztdrj * attractive
+                    gk = 0.5 * fc_ij * bij_d * dztdrk * attractive
+
+                    forces[i] = forces[i] - gi
+                    forces[idx_j] = forces[idx_j] - gj
+                    forces[idx_k] = forces[idx_k] - gk
+
+        return E_total, forces
+
+    def _zeta_and_deriv(self, j_slot, vectors, distances, p: TersoffParameters):
+        """Compute zeta_ij and per-k derivatives.
+
+        Returns
+        -------
+        zeta : scalar tensor
+        dzeta_dri, dzeta_drj_all, dzeta_drk_all : (ni, 3) tensors
+            Each row k gives the k-th term's contribution to d(zeta_ij)/dr_{i|j|k}.
+            Rows where k == j_slot are zero.
+        """
+        ni = vectors.shape[0]
+        device = vectors.device
+        dtype = vectors.dtype
+
+        r_ij_vec = vectors[j_slot]
+        abs_rij = distances[j_slot]
+        rij_hat = r_ij_vec / abs_rij
+
+        zeta = torch.zeros((), dtype=dtype, device=device)
+        dri = torch.zeros((ni, 3), dtype=dtype, device=device)
+        drj = torch.zeros((ni, 3), dtype=dtype, device=device)
+        drk = torch.zeros((ni, 3), dtype=dtype, device=device)
+
+        for k in range(ni):
+            if k == j_slot:
+                continue
+            r_ik_vec = vectors[k]
+            abs_rik = distances[k]
+            if abs_rik > p.R + p.D:
+                continue
+            rik_hat = r_ik_vec / abs_rik
+
+            fcik = self._fc(abs_rik, p.R, p.D)
+            dfcik = self._fc_d(abs_rik, p.R, p.D)
+
+            # Matches installed ase.calculators.tersoff: arg = lambda3 * (r_ij - r_ik)^m
+            arg = p.lambda3 * (abs_rij - abs_rik) ** p.m
+            ex_delr = self._safe_exp(arg)
+            ex_delr_d = (
+                p.m * p.lambda3 * (abs_rij - abs_rik) ** (p.m - 1) * ex_delr
+            )
+
+            costheta = rij_hat @ rik_hat
+            gijk = self._gijk(costheta, p)
+            gijk_d = self._gijk_d(costheta, p)
+
+            zeta = zeta + fcik * gijk * ex_delr
+
+            # d cos(theta) / d r_i, r_j, r_k
+            drj_cos = (rik_hat / abs_rik - costheta * rij_hat / abs_rij) / 1.0
+            drj_cos = (r_ik_vec / abs_rik - costheta * r_ij_vec / abs_rij) / abs_rij
+            drk_cos = (r_ij_vec / abs_rij - costheta * r_ik_vec / abs_rik) / abs_rik
+            dri_cos = -(drj_cos + drk_cos)
+
+            dri_k = -dfcik * gijk * ex_delr * rik_hat
+            dri_k = dri_k + fcik * gijk_d * ex_delr * dri_cos
+            dri_k = dri_k + fcik * gijk * ex_delr_d * rik_hat
+            dri_k = dri_k - fcik * gijk * ex_delr_d * rij_hat
+
+            drj_k = fcik * gijk_d * ex_delr * drj_cos
+            drj_k = drj_k + fcik * gijk * ex_delr_d * rij_hat
+
+            drk_k = dfcik * gijk * ex_delr * rik_hat
+            drk_k = drk_k + fcik * gijk_d * ex_delr * drk_cos
+            drk_k = drk_k - fcik * gijk * ex_delr_d * rik_hat
+
+            dri[k] = dri_k
+            drj[k] = drj_k
+            drk[k] = drk_k
+
+        return zeta, dri, drj, drk
+
+
+# Backward-compat alias
+Tersoff = TorchTersoff
