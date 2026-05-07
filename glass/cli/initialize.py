@@ -37,8 +37,8 @@ def _calculate_cell_volume(n_atoms, density, species_list, counts_list):
     )
 
     # Convert density from g/cm^3 to amu/Angstrom^3
-    # 1 g/cm^3 = 1.66053906660 amu/Angstrom^3
-    density_amu = density * 1.66053906660
+    # 1 g/cm^3 = 0.602214 amu/Angs^3
+    density_amu = density * 0.602214
 
     # Volume = mass / density
     volume = total_mass / density_amu
