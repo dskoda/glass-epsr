@@ -18,6 +18,7 @@ dependencies = [
     "scipy>=1.10",
     "DebyeCalculator",
     "tensorboard",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
