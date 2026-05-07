@@ -53,7 +53,7 @@ glass train_spec xas_train \
 	--data-root $DATA_ROOT --resume
 
 # ── plot_loss ──────────────────────────────────────────────────────────────────
-glass plot_loss /home/jwguo/03_denoiser/demo_Si/models/pre_trained --output score_loss.pdf
+glass plot_loss /path/to/demo_Si/models/pre_trained --output score_loss.pdf
 
 # ── uncond_denoise ─────────────────────────────────────────────────────────────
 # Single model, full trajectory
@@ -163,7 +163,7 @@ glass write_spec_feature \
 # Reference mode
 glass write_spec_feature --mode reference \
 	--system $SYSTEM \
-	--atoms-path /home/jwguo/03_denoiser/reference/amorph_Si_216 \
+	--atoms-path /path/to/reference/amorph_Si_216 \
 	--exafs-model $EXAFS_MODEL --xanes-model $XANES_MODEL \
 	--outdir results
 
@@ -171,7 +171,7 @@ glass write_spec_feature --mode reference \
 glass build_ref_stats \
 	--input results/reference_Si_spectra.json \
 	--system $SYSTEM \
-	--atoms-path /home/jwguo/03_denoiser/reference/amorph_Si_216 \
+	--atoms-path /path/to/reference/amorph_Si_216 \
 	--outdir results
 
 # ── calc_metrics ───────────────────────────────────────────────────────────────
