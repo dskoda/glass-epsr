@@ -14,12 +14,12 @@ import click
 
 @click.group()
 def glass():
-    """CLI for training and running the glass uncond_denoiser workflows."""
+    """CLI for training and generating atomic structures with glass."""
     pass
 
 
-from glass.cli.train import train_score, train_spec
-from glass.cli.denoise import uncond_denoise, cond_denoise
+from glass.cli.train import train
+from glass.cli.generate import generate
 from glass.cli.initialize import initialize
 from glass.cli.analysis import (
     plot_loss,
@@ -28,11 +28,9 @@ from glass.cli.analysis import (
     build_ref_stats,
 )
 
-glass.add_command(train_score)
-glass.add_command(train_spec)
+glass.add_command(train)
+glass.add_command(generate)
 glass.add_command(plot_loss)
-glass.add_command(uncond_denoise)
-glass.add_command(cond_denoise)
 glass.add_command(initialize)
 glass.add_command(write_spec_feature)
 glass.add_command(calc_metrics)
