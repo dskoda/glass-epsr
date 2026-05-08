@@ -324,6 +324,10 @@ EXAMPLES:
   # Compare using pre-computed metrics
   glass compare ref_metrics.json target_metrics.json --from-json
 
+  # Compare with specific structure from multi-structure JSON
+  glass compare ref_metrics.json target_metrics.json --from-json \
+    --ref-structure "Si_2.5_00.xyz" --target-structure "Si_2.5_01.xyz"
+
   # Compare with detailed output
   glass compare ref.xyz target.xyz --detailed
 
@@ -344,6 +348,18 @@ METRICS COMPUTED:
     default=False,
     show_default=True,
     help="Load from JSON metrics files instead of computing from XYZ.",
+)
+@click.option(
+    "--ref-structure",
+    type=str,
+    default=None,
+    help="Structure name to load from reference JSON (for multi-structure files).",
+)
+@click.option(
+    "--target-structure",
+    type=str,
+    default=None,
+    help="Structure name to load from target JSON (for multi-structure files).",
 )
 @click.option(
     "--pdf-cutoff",
@@ -375,6 +391,8 @@ def compare_command(
     reference: str,
     target: str,
     from_json: bool,
+    ref_structure: Optional[str],
+    target_structure: Optional[str],
     pdf_cutoff: float,
     detailed: bool,
     output: Optional[str],
@@ -386,10 +404,10 @@ def compare_command(
         if from_json:
             # Load metrics from JSON files
             click.echo(f"Loading reference from {reference}...")
-            ref_metrics = load_metrics_from_json(reference)
+            ref_metrics = load_metrics_from_json(reference, structure_name=ref_structure)
             
             click.echo(f"Loading target from {target}...")
-            target_metrics = load_metrics_from_json(target)
+            target_metrics = load_metrics_from_json(target, structure_name=target_structure)
         else:
             # Compute metrics from structure files
             click.echo(f"Computing metrics for reference: {reference}...")

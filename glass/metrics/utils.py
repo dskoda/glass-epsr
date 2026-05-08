@@ -7,11 +7,14 @@ from typing import Union, Dict, Any
 from glass.metrics.core import StructuralMetrics
 
 
-def load_metrics_from_json(filepath: Union[str, Path]) -> StructuralMetrics:
+def load_metrics_from_json(filepath: Union[str, Path], structure_name: str = None) -> StructuralMetrics:
     """Load StructuralMetrics from a JSON file.
     
     Args:
         filepath: Path to JSON file
+        structure_name: If the JSON contains multiple structures (CLI output format),
+                       specify which structure to load. If None and only one structure
+                       exists, that structure is used.
     
     Returns:
         StructuralMetrics object
@@ -24,6 +27,27 @@ def load_metrics_from_json(filepath: Union[str, Path]) -> StructuralMetrics:
     
     with open(filepath, 'r') as f:
         data = json.load(f)
+    
+    # Handle CLI output format: {"metadata": {...}, "structures": {"name": {...}}}
+    if 'structures' in data:
+        structures = data['structures']
+        if len(structures) == 0:
+            raise ValueError("No structures found in JSON file")
+        
+        if structure_name is not None:
+            if structure_name not in structures:
+                available = list(structures.keys())
+                raise ValueError(f"Structure '{structure_name}' not found. Available: {available}")
+            data = structures[structure_name]
+        elif len(structures) == 1:
+            data = list(structures.values())[0]
+        else:
+            # Multiple structures, use the first one
+            data = list(structures.values())[0]
+    
+    # Handle error structures
+    if 'error' in data:
+        raise ValueError(f"Cannot load metrics with error: {data['error']}")
     
     # Build PDF metrics
     pdf_data = data['pdf']
