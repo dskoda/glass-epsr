@@ -1,6 +1,4 @@
 import os
-import glob
-import math
 import click
 import torch
 import numpy as np
@@ -9,6 +7,14 @@ from tqdm import tqdm
 from glass.experiment import Experiment
 from glass.lit.datamodules import StructureSpecDataModule
 from glass.lit.modules import LitScoreNet, LitSpecNet
+from glass.diffusion.sampling import denoise_by_sde
+from glass.lit.modules.likelihood import LikelihoodScore
+from glass.lit.modules.guidance import create_guidance_model, load_experimental_data
+from glass.utils.atoms_utils import (
+    atoms_to_device,
+    compute_prior_score,
+    compute_target_from_reference,
+)
 
 
 @click.command(
@@ -231,19 +237,8 @@ def generate(
     biso,
 ):
     """Generate structures using trained score model."""
-    import copy
     import ase
     from ase.io import read
-    from torch import nn
-    
-    from glass.nn import periodic_radius_graph
-    from glass.lit.functions.get_atoms import initialize_atoms
-    from glass.lit.modules import (
-        DifferentiableRDF,
-        DifferentiableADF,
-        DifferentiableXRD,
-        DifferentiableND,
-    )
     
     # Set CUDA memory config
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -260,46 +255,27 @@ def generate(
         )
     
     # Apply CLI overrides
-    if device is None:
-        device = config.device
-    if tmin is None:
-        tmin = config.tmin
-    if tmax is None:
-        tmax = config.tmax
-    if tstep is None:
-        tstep = config.tstep
-    if cutoff is None:
-        cutoff = config.cutoff
-    if n_runs is None:
-        n_runs = config.n_runs
-    if save_traj is None:
-        save_traj = config.save_traj
-    if rho is None:
-        rho = config.rho
-    if bin_size is None:
-        bin_size = config.bin_size
-    if angle_bins is None:
-        angle_bins = config.angle_bins
-    if adf_sigma is None:
-        adf_sigma = config.adf_sigma
-    if adf_cutoff is None:
-        adf_cutoff = config.adf_cutoff
-    if element_names is None or len(element_names) == 0:
-        element_names = config.element_names
-    if qmin is None:
-        qmin = config.qmin
-    if qmax is None:
-        qmax = config.qmax
-    if qstep is None:
-        qstep = config.qstep
-    if biso is None:
-        biso = config.biso
+    device = device or config.device
+    tmin = tmin or config.tmin
+    tmax = tmax or config.tmax
+    tstep = tstep or config.tstep
+    cutoff = cutoff or config.cutoff
+    n_runs = n_runs or config.n_runs
+    save_traj = save_traj if save_traj is not None else config.save_traj
+    rho = rho or config.rho
+    bin_size = bin_size or config.bin_size
+    angle_bins = angle_bins or config.angle_bins
+    adf_sigma = adf_sigma or config.adf_sigma
+    adf_cutoff = adf_cutoff or config.adf_cutoff
+    element_names = list(element_names) if element_names else config.element_names
+    qmin = qmin or config.qmin
+    qmax = qmax or config.qmax
+    qstep = qstep or config.qstep
+    biso = biso or config.biso
     
     # Resolve output directory
     if outdir is None:
         outdir = experiment.outputs_dir
-    else:
-        outdir = os.path.join(outdir)
     os.makedirs(outdir, exist_ok=True)
     
     # Setup device
@@ -338,51 +314,21 @@ def generate(
     if guidance_type:
         click.echo(f"Guidance type: {guidance_type}")
         
-        if guidance_type == "pdf":
-            guidance_model = DifferentiableRDF(
-                cutoff=cutoff, bin_size=bin_size, sigma=0.15
-            )
-            guidance_model.eval()
-        elif guidance_type == "adf":
-            guidance_model = DifferentiableADF(
-                cutoff=adf_cutoff,
-                angle_bins=angle_bins,
-                angle_range=[0, math.pi],
-                sigma=adf_sigma,
-                normalize=False,
-            )
-            guidance_model.eval()
-        elif guidance_type == "xrd":
-            if not element_names:
-                raise click.ClickException(
-                    "--element-names required for xrd guidance"
-                )
-            guidance_model = DifferentiableXRD(
-                q_vals=[qmin, qmax, qstep],
-                element_names=list(element_names),
-                biso=biso,
-            )
-            guidance_model.to(device).eval()
-        elif guidance_type == "nd":
-            if not element_names:
-                raise click.ClickException(
-                    "--element-names required for nd guidance"
-                )
-            guidance_model = DifferentiableND(
-                q_vals=[qmin, qmax, qstep],
-                element_names=list(element_names),
-                biso=biso,
-            )
-            guidance_model.to(device).eval()
-        elif guidance_type in ("exafs", "xanes"):
-            if not spec_model_path:
-                raise click.ClickException(
-                    f"--spec-model-path required for {guidance_type} guidance"
-                )
-            spec_net = LitSpecNet.load_from_checkpoint(spec_model_path, map_location=device)
-            spec_net.eval()
-            spec_net.ema_model.to(device).eval()
-            guidance_model = spec_net.ema_model
+        guidance_model = create_guidance_model(
+            guidance_type=guidance_type,
+            device=device,
+            cutoff=cutoff,
+            bin_size=bin_size,
+            angle_bins=angle_bins,
+            adf_sigma=adf_sigma,
+            adf_cutoff=adf_cutoff,
+            element_names=element_names,
+            qmin=qmin,
+            qmax=qmax,
+            qstep=qstep,
+            biso=biso,
+            spec_model_path=spec_model_path,
+        )
         
         # Validate ref_path vs exp_data
         if not ref_path and not exp_data:
@@ -395,122 +341,18 @@ def generate(
     # Load experimental target if specified
     exp_target_y = None
     if exp_data:
-        import json
-        with open(exp_data) as f:
-            d = json.load(f)
-        x_exp = np.array(d.get("x", d.get("r")))
-        y_exp = np.array(d.get("y", d.get("g")))
-        
-        if guidance_type == "pdf":
-            bin_edges = np.linspace(0, cutoff, bin_size + 1)
-            x_grid = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-        elif guidance_type == "adf":
-            x_grid = np.linspace(0, math.pi, angle_bins)
-        elif guidance_type in ("xrd", "nd"):
-            x_grid = np.arange(qmin, qmax, qstep)
-        else:
-            raise click.ClickException(
-                f"--exp-data not yet supported for {guidance_type}"
-            )
-        
-        y_interp = np.interp(x_grid, x_exp, y_exp)
-        exp_target_y = torch.from_numpy(y_interp).float().unsqueeze(0).to(device)
-        click.echo(f"Loaded experimental target from {exp_data}")
-    
-    # Helper functions
-    def _to_device(atoms):
-        _, species, pos, cell = initialize_atoms(atoms)
-        return (
-            species.to(device),
-            pos.to(device=device, dtype=torch.float32),
-            cell.to(device=device, dtype=torch.float32),
+        exp_target_y = load_experimental_data(
+            exp_data_path=exp_data,
+            guidance_type=guidance_type,
+            cutoff=cutoff,
+            bin_size=bin_size,
+            angle_bins=angle_bins,
+            qmin=qmin,
+            qmax=qmax,
+            qstep=qstep,
+            device=device,
         )
-    
-    def _prior_score(species, pos, cell, t, cut, score_net, diffuser):
-        edge_index, edge_vec = periodic_radius_graph(pos, cut, cell)
-        edge_attr = torch.hstack([edge_vec, edge_vec.norm(dim=-1, keepdim=True)])
-        return score_net.ema_model(species, edge_index, edge_attr, t, diffuser.sigma(t))
-    
-    # Likelihood score class for conditional generation
-    class LikelihoodScore(nn.Module):
-        def __init__(
-            self, score_net, guidance_model, target_y, rho, diffuser, guidance_type, cut
-        ):
-            super().__init__()
-            self.score_net = score_net
-            self.guidance_model = guidance_model
-            self.target_y = target_y
-            self.rho = rho
-            self.diffuser = diffuser
-            self.guidance_type = guidance_type
-            self.cut = cut
-        
-        def forward(self, species, pos, cell, t, cut):
-            with torch.enable_grad():
-                pos = pos.detach().clone().requires_grad_(True)
-                edge_index, edge_vec = periodic_radius_graph(pos, cut, cell)
-                edge_attr = torch.hstack(
-                    [edge_vec, edge_vec.norm(dim=-1, keepdim=True)]
-                )
-                sigma = self.diffuser.sigma(t)
-                with torch.no_grad():
-                    score = self.score_net(species, edge_index, edge_attr, t, sigma)
-                est_clean_pos = pos + sigma.pow(2) * score
-                
-                if self.guidance_type in ("pdf", "adf"):
-                    pred_y = self.guidance_model(
-                        est_clean_pos.cpu(), species.cpu(), cell.cpu()
-                    )[1].to(pos.device)
-                    norm = torch.linalg.norm(
-                        self.target_y - pred_y, dim=1, keepdim=True
-                    )
-                elif self.guidance_type in ("xrd", "nd"):
-                    pred_y = self.guidance_model(est_clean_pos, species)
-                    norm = torch.linalg.norm(self.target_y - pred_y)
-                elif self.guidance_type in ("exafs", "xanes"):
-                    ei2, ev2 = periodic_radius_graph(est_clean_pos, self.cut, cell)
-                    ea2 = torch.hstack([ev2, ev2.norm(dim=-1, keepdim=True)])
-                    pred_y = self.guidance_model(species, ei2, ea2)
-                    norm = torch.linalg.norm(
-                        self.target_y - pred_y, dim=1, keepdim=True
-                    )
-                
-                loss = norm.square().mean()
-                grad = torch.autograd.grad(loss, est_clean_pos)[0]
-            return -(self.rho / (norm.sum() + 1e-12)) * grad.detach(), norm.detach()
-    
-    # SDE denoising
-    def _denoise_by_sde(
-        species, pos, cell, cut, score_fn, likelihood_fn, ts, diffuser, save_traj
-    ):
-        ts = ts.to(pos.device).view(-1, 1)
-        f, g, g2 = diffuser.f, diffuser.g, diffuser.g2
-        traj = [pos.detach().cpu().clone()] if save_traj else None
-        pos = pos.detach()
-        
-        for i, t in enumerate(ts[1:]):
-            dt = ts[i + 1] - ts[i]
-            eps = dt.abs().sqrt() * torch.randn_like(pos)
-            with torch.no_grad():
-                p_score = score_fn(species, pos, cell, t, cut)
-            
-            if likelihood_fn is not None:
-                l_score, norm = likelihood_fn(species, pos, cell, t, cut)
-                click.echo(
-                    f"    p={p_score.norm().item():.3f}  "
-                    f"l={l_score.norm().item():.3f}  "
-                    f"tgt={norm.sum().item():.4f}",
-                    err=True,
-                )
-                disp = (f(t) * pos - g2(t) * (p_score + l_score)) * dt + g(t) * eps
-            else:
-                disp = (f(t) * pos - g2(t) * p_score) * dt + g(t) * eps
-            
-            pos = (pos + disp).detach()
-            if save_traj:
-                traj.append(pos.cpu().clone())
-        
-        return traj if save_traj else pos
+        click.echo(f"Loaded experimental target from {exp_data}")
     
     # Get initial structures
     init_files = experiment.get_init_files(inits)
@@ -520,6 +362,14 @@ def generate(
     
     # Time steps
     ts_torch = torch.linspace(tmax, tmin, tstep, device=device)
+    
+    # Progress callback for denoising
+    def progress_callback(step, t, p_norm, l_norm=None, target_norm=None):
+        if l_norm is not None:
+            click.echo(
+                f"    p={p_norm:.3f}  l={l_norm:.3f}  tgt={target_norm:.4f}",
+                err=True,
+            )
     
     # Process each initial structure
     for init_file in init_files:
@@ -536,27 +386,13 @@ def generate(
                 continue
             ref_atoms = read(ref_file, "-1")
             if not (np.all(init_atoms.pbc) and np.all(ref_atoms.pbc)):
-                raise click.ClickException(f"PBC must be True for both init and ref")
+                raise click.ClickException("PBC must be True for both init and ref")
             if not np.allclose(init_atoms.get_cell(), ref_atoms.get_cell(), atol=1e-5):
-                raise click.ClickException(f"Init and ref cells must match")
+                raise click.ClickException("Init and ref cells must match")
             
-            _, ref_species, ref_pos, ref_cell = initialize_atoms(ref_atoms)
-            
-            if guidance_type in ("pdf", "adf"):
-                target_y = guidance_model(
-                    ref_pos.cpu(), ref_species.cpu(), ref_cell.cpu()
-                )[1].to(device)
-            elif guidance_type in ("xrd", "nd"):
-                target_y = guidance_model(
-                    ref_pos.to(device), ref_species.to(device)
-                )
-            elif guidance_type in ("exafs", "xanes"):
-                ei_r, ev_r = periodic_radius_graph(
-                    ref_pos.to(device), cutoff, ref_cell.to(device)
-                )
-                ea_r = torch.hstack([ev_r, ev_r.norm(dim=-1, keepdim=True)])
-                with torch.no_grad():
-                    target_y = guidance_model(ref_species.to(device), ei_r, ea_r)
+            target_y = compute_target_from_reference(
+                ref_atoms, guidance_model, guidance_type, cutoff, device
+            )
         elif exp_data:
             target_y = exp_target_y
         
@@ -581,28 +417,31 @@ def generate(
             run_outdir = os.path.join(outdir, sub_id, run_tag)
         os.makedirs(run_outdir, exist_ok=True)
         
+        # Prior function wrapper
         def prior_fn(sp, p, c, t, co, _sn=score_net, _df=diffuser):
-            return _prior_score(sp, p, c, t, co, _sn, _df)
+            return compute_prior_score(sp, p, c, t, co, _sn, _df)
         
         for i in range(n_runs):
-            species, pos, cell = _to_device(copy.deepcopy(init_atoms))
+            import copy
+            species, pos, cell = atoms_to_device(copy.deepcopy(init_atoms), device)
             cell_np = cell.detach().cpu().numpy()
             
-            result = _denoise_by_sde(
-                species,
-                pos,
-                cell,
-                cutoff,
-                prior_fn,
-                likelihood_fn,
-                ts_torch,
-                diffuser,
-                save_traj,
+            traj, final_pos = denoise_by_sde(
+                species=species,
+                pos=pos,
+                cell=cell,
+                cutoff=cutoff,
+                score_fn=prior_fn,
+                likelihood_fn=likelihood_fn,
+                ts=ts_torch,
+                diffuser=diffuser,
+                save_traj=save_traj,
+                progress_fn=progress_callback if guidance_type else None,
             )
             
             if save_traj:
-                traj = []
-                for p in result:
+                traj_list = []
+                for p in traj:
                     a = ase.Atoms(
                         numbers=init_atoms.numbers,
                         positions=p.numpy(),
@@ -610,13 +449,13 @@ def generate(
                         pbc=[True] * 3,
                     )
                     a.wrap()
-                    traj.append(a)
-                ase.io.write(f"{run_outdir}/{i:02}_traj.xyz", traj)
-                ase.io.write(f"{run_outdir}/{i:02}_final.xyz", traj[-1])
+                    traj_list.append(a)
+                ase.io.write(f"{run_outdir}/{i:02}_traj.xyz", traj_list)
+                ase.io.write(f"{run_outdir}/{i:02}_final.xyz", traj_list[-1])
             else:
                 final = ase.Atoms(
                     numbers=init_atoms.numbers,
-                    positions=result.cpu().numpy(),
+                    positions=final_pos.cpu().numpy(),
                     cell=cell_np,
                     pbc=[True] * 3,
                 )
