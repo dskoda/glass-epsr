@@ -37,8 +37,8 @@ glass.add_command(calc_metrics)
 glass.add_command(build_ref_stats)
 
 # Register Tersoff potential subcommands (md, energy) under the `glass` group.
-from glass.potentials.torch_tersoff.cli import md as _tersoff_md
-from glass.potentials.torch_tersoff.cli import energy as _tersoff_energy
+from glass.potentials.tersoff.cli import md as _tersoff_md
+from glass.potentials.tersoff.cli import energy as _tersoff_energy
 
 glass.add_command(_tersoff_md, name="md")
 glass.add_command(_tersoff_energy, name="energy")
