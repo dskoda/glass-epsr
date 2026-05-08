@@ -10,6 +10,10 @@ from glass.lit.modules import LitScoreNet, LitSpecNet
 from glass.diffusion.sampling import denoise_by_sde
 from glass.lit.modules.likelihood import LikelihoodScore
 from glass.lit.modules.guidance import create_guidance_model, load_experimental_data
+from glass.lit.modules.tersoff_guidance import (
+    TersoffEnergyGuidance,
+    TersoffSchedule,
+)
 from glass.utils.atoms_utils import (
     atoms_to_device,
     compute_prior_score,
@@ -209,6 +213,40 @@ GUIDANCE TYPES:
     default=None,
     help="[xrd/nd] Debye-Waller B factor.",
 )
+# Tersoff (empirical-potential) guidance
+@click.option(
+    "--tersoff-guidance/--no-tersoff-guidance",
+    default=False,
+    help="Add Tersoff-energy gradient as an auxiliary score term during the reverse SDE.",
+)
+@click.option(
+    "--tersoff-lambda",
+    type=float,
+    default=0.05,
+    show_default=True,
+    help="[tersoff] Weight lambda_0 for the Tersoff guidance schedule.",
+)
+@click.option(
+    "--tersoff-schedule",
+    type=click.Choice(["constant", "linear", "sigmoid"]),
+    default="linear",
+    show_default=True,
+    help="[tersoff] Shape of lambda(t).",
+)
+@click.option(
+    "--tersoff-t-gate",
+    type=float,
+    default=0.3,
+    show_default=True,
+    help="[tersoff] Gate time for the sigmoid schedule.",
+)
+@click.option(
+    "--tersoff-clamp",
+    type=float,
+    default=10.0,
+    show_default=True,
+    help="[tersoff] Per-atom guidance-norm clamp (Å units of autograd/N).",
+)
 def generate(
     experiment_path,
     inits,
@@ -235,6 +273,11 @@ def generate(
     qmax,
     qstep,
     biso,
+    tersoff_guidance,
+    tersoff_lambda,
+    tersoff_schedule,
+    tersoff_t_gate,
+    tersoff_clamp,
 ):
     """Generate structures using trained score model."""
     import ase
@@ -309,6 +352,25 @@ def generate(
     datamodule.setup()
     diffuser = datamodule.train_set.diffuser
     
+    # Setup Tersoff-energy guidance if requested (independent of conditional guidance).
+    tersoff_guidance_fn = None
+    tersoff_schedule_fn = None
+    if tersoff_guidance:
+        click.echo(
+            f"Tersoff guidance: schedule={tersoff_schedule} "
+            f"lambda0={tersoff_lambda} t_gate={tersoff_t_gate} "
+            f"clamp={tersoff_clamp}"
+        )
+        tersoff_guidance_fn = TersoffEnergyGuidance(
+            clamp_norm=tersoff_clamp,
+        )
+        tersoff_schedule_fn = TersoffSchedule(
+            schedule=tersoff_schedule,
+            lambda_0=tersoff_lambda,
+            tmax=tmax,
+            t_gate=tersoff_t_gate,
+        )
+
     # Setup guidance model if conditional
     guidance_model = None
     if guidance_type:
@@ -415,6 +477,14 @@ def generate(
             rho_str = f"{int(rho)}" if rho == int(rho) else f"{rho:.2f}"
             run_tag = f"{guidance_type}_rho{rho_str}_tmax{tmax}_nsteps{tstep}"
             run_outdir = os.path.join(outdir, sub_id, run_tag)
+        if tersoff_guidance:
+            lam_str = f"{tersoff_lambda:g}"
+            gate_str = f"{tersoff_t_gate:g}"
+            run_tag = (
+                f"tersoff_{tersoff_schedule}_lam{lam_str}_gate{gate_str}"
+                f"_tmax{tmax}_nsteps{tstep}"
+            )
+            run_outdir = os.path.join(outdir, sub_id, run_tag)
         os.makedirs(run_outdir, exist_ok=True)
         
         # Prior function wrapper
@@ -437,6 +507,8 @@ def generate(
                 diffuser=diffuser,
                 save_traj=save_traj,
                 progress_fn=progress_callback if guidance_type else None,
+                tersoff_guidance=tersoff_guidance_fn,
+                tersoff_schedule=tersoff_schedule_fn,
             )
             
             if save_traj:
