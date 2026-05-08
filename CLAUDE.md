@@ -4,95 +4,235 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-A single Python package `glass` (defined by `./pyproject.toml`) that combines:
+A single Python package `glass` (defined by `./pyproject.toml`) for generative modeling of amorphous materials using score-based diffusion models.
 
-1. **`glass.lit`** — score-based generative model for reconstructing amorphous structures. Training, unconditional denoising, and guided denoising via spectral/structural observables (pdf, adf, xrd, nd, exafs, xanes). Requires `lightning` (not installed by default in this env).
-2. **`glass.potentials.torch_tersoff`** — PyTorch reimplementation of the LAMMPS-style Tersoff interatomic potential. Single-species Si, autograd-based forces. Exports `TorchTersoff`, `TorchTersoffCalculator` (ASE `Calculator` subclass), and `silicon_calculator()`.
+### Components
 
-The Tersoff potential is intended to be wired into the denoising workflow as additional guidance (energy minimization) and as an optional post-denoising relaxation step.
+1. **`glass.lit`** — Score-based generative model for reconstructing amorphous structures
+   - Training, unconditional denoising, and guided denoising
+   - Spectral/structural observables: PDF, ADF, XRD, ND, EXAFS, XANES
+   - Requires `lightning` (not installed by default in this env)
 
-## Common commands
+2. **`glass.potentials.torch_tersoff`** — PyTorch reimplementation of LAMMPS-style Tersoff potential
+   - Single-species Si, autograd-based forces
+   - Exports: `TorchTersoff`, `TorchTersoffCalculator` (ASE Calculator subclass), `silicon_calculator()`
+   - Intended for energy-based guidance and post-denoising relaxation
+
+3. **`glass.metrics`** — Structural analysis metrics (non-differentiable)
+   - PDF (Pair Distribution Function), ADF (Angular Distribution Function)
+   - Coordination numbers, dihedral angles, structure factor S(q), Voronoi analysis
+   - Error metrics for comparing structures (RMSE, cosine similarity, EMD, etc.)
+
+## Quick Start
 
 ```bash
+# Install package
 pip install -e .
 
-# Full test suite (fast — ~3 s, does not need lightning)
+# Install optional dependencies for full functionality
+pip install -e ".[plot,diffraction]"
+
+# Run tests
+KMP_DUPLICATE_LIB_OK=TRUE pytest -v
+```
+
+## Architecture
+
+### Package Layout
+
+```
+./
+├── pyproject.toml                      # Package definition
+├── glass/
+│   ├── cli.py                          # Main CLI (train, generate, metrics, etc.)
+│   ├── lit/                            # Lightning training + denoising
+│   │   ├── datamodules/                # PyG Data pipeline
+│   │   ├── functions/get_atoms.py      # ASE → tensor conversion
+│   │   └── modules/
+│   │       ├── prior.py                # LitScoreNet (score-based SDE)
+│   │       ├── forward.py              # LitSpecNet (spectral surrogate)
+│   │       ├── differentiable_rdf.py   # Differentiable PDF guidance
+│   │       ├── differentiable_adf.py   # Differentiable ADF guidance
+│   │       ├── differentiable_xrd.py   # Differentiable XRD guidance
+│   │       └── differentiable_nd.py    # Differentiable ND guidance
+│   ├── metrics/                        # Structural analysis (non-differentiable)
+│   │   ├── core.py                     # Dataclasses (PDFMetrics, etc.)
+│   │   ├── structural.py               # PDF, ADF computation
+│   │   ├── geometric.py                # Coordination, dihedrals
+│   │   ├── advanced.py                 # S(q), Voronoi
+│   │   ├── errors.py                   # Error metrics for comparison
+│   │   └── utils.py                    # JSON loading helpers
+│   └── potentials/
+│       └── torch_tersoff/              # Tersoff potential
+│           ├── params.py               # Parameters
+│           ├── neighbors.py            # Neighbor list
+│           ├── potential.py            # Energy + forces
+│           ├── ase_calc.py             # ASE Calculator
+│           └── cli.py                  # MD, energy commands
+└── tests/                              # Test suite
+    ├── test_tersoff.py
+    ├── test_metrics.py
+    └── data/Si_2.5_00.xyz
+```
+
+## Common Commands
+
+### Testing
+
+```bash
+# Full test suite (~3s, does not need lightning)
 KMP_DUPLICATE_LIB_OK=TRUE pytest -v
 
 # Single test
 KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_tersoff.py::test_snapshot_energy -v
 
-# Tersoff CLI (works without lightning)
-KMP_DUPLICATE_LIB_OK=TRUE python -m glass.potentials.torch_tersoff.cli energy ./tests/data/Si_2.5_00.xyz
-KMP_DUPLICATE_LIB_OK=TRUE python -m glass.potentials.torch_tersoff.cli md \
-    --input ./tests/data/Si_2.5_00.xyz --ensemble nve --steps 100 --timestep 1.0
+# Metrics tests
+KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_metrics.py -v
+```
 
-# Full glass CLI (requires lightning installed separately)
-KMP_DUPLICATE_LIB_OK=TRUE glass --help
-# Tersoff md/energy are registered as subcommands of the glass group:
+### Training
+
+```bash
+# Create experiment and train score model
+glass train ./my_experiment --model-type score --num-species 1
+
+# Train spectral surrogate (EXAFS)
+glass train ./my_experiment --model-type spec --spec-type exafs --num-species 1
+
+# Resume training
+glass train ./my_experiment --resume
+
+# Override parameters
+glass train ./my_experiment --max-epochs 5000 --lr 0.0005 --dim 256
+```
+
+### Generation
+
+```bash
+# Unconditional generation
+glass generate ./my_experiment --inits ./inits/
+
+# PDF-guided generation
+glass generate ./my_experiment --inits ./inits/ \
+    --guidance-type pdf --ref-path ./reference/
+
+# XRD-guided generation
+glass generate ./my_experiment --inits ./inits/ \
+    --guidance-type xrd --ref-path ./reference/ \
+    --element-names Si --rho 5
+```
+
+### Metrics
+
+```bash
+# Compute all metrics for a structure
+glass metrics structure.xyz --output metrics.json
+
+# Batch process
+glass metrics ./structures/*.xyz --output metrics.json
+
+# Compare two structures
+glass compare ref.xyz target.xyz
+
+# Compare using pre-computed metrics
+glass compare ref.json target.json --from-json
+
+# Individual metrics
+glass pdf structure.xyz --output pdf.json
+glass coordination structure.xyz --output coord.json
+```
+
+### Tersoff Potential
+
+```bash
+# Compute energy
 KMP_DUPLICATE_LIB_OK=TRUE glass energy ./tests/data/Si_2.5_00.xyz
-KMP_DUPLICATE_LIB_OK=TRUE glass md --input ... --ensemble nve ...
+
+# Run MD
+KMP_DUPLICATE_LIB_OK=TRUE glass md \
+    --input ./tests/data/Si_2.5_00.xyz \
+    --ensemble nve --steps 100 --timestep 1.0
 ```
 
-`KMP_DUPLICATE_LIB_OK=TRUE` is needed on macOS when mixing PyTorch and SciPy-backed ASE in the same process. The CLI and the test file set this automatically; it's only needed explicitly for ad-hoc Python scripts.
+## Implementation Details
 
-## Architecture
-
-### Package layout
+### Experiment Structure
 
 ```
-./
-├── pyproject.toml                      # single package definition: `glass`
-├── glass/
-│   ├── cli.py                          # click group `glass`: train/denoise + md/energy
-│   ├── lit/                            # Lightning training + denoising code
-│   │   ├── datamodules/                # StructureSpecDataModule (PyG Data pipeline)
-│   │   ├── functions/get_atoms.py      # initialize_atoms(): ASE -> (species one-hot, pos, cell) tensors
-│   │   └── modules/
-│   │       ├── prior.py                # LitScoreNet (score-based SDE denoiser)
-│   │       ├── forward.py              # LitSpecNet (per-atom spectral surrogate)
-│   │       ├── differentiable_rdf.py   # DifferentiableRDF guidance
-│   │       ├── differentiable_adf.py   # DifferentiableADF guidance
-│   │       ├── differentiable_xrd.py   # DifferentiableXRD guidance
-│   │       └── differentiable_nd.py    # DifferentiableND guidance
-│   └── potentials/
-│       └── torch_tersoff/              # PyTorch Tersoff potential
-│           ├── params.py               # TersoffParameters dataclass (14 floats, LAMMPS order)
-│           ├── neighbors.py            # build_neighbors: torch-native, orthorhombic
-│           ├── potential.py            # TorchTersoff.energy + autograd/analytical forces
-│           ├── ase_calc.py             # TorchTersoffCalculator (ASE Calculator subclass)
-│           └── cli.py                  # Click commands `md`, `energy` (also attached to glass group)
-└── tests/
-    ├── test_tersoff.py                 # 6 tests validating the Tersoff implementation
-    └── data/Si_2.5_00.xyz              # 216-atom disordered Si snapshot
+my_experiment/
+├── config.yaml          # All parameters
+├── data/                # Training data (*.xyz)
+├── checkpoints/         # Model checkpoints
+│   ├── best.ckpt
+│   ├── last.ckpt
+│   └── epoch_*.ckpt
+├── inits/               # Initial structures for generation
+├── outputs/             # Generated structures
+└── logs/                # TensorBoard logs
 ```
 
-### Denoising flow (glass.cli.cond_denoise, cli.py:1170–1549)
+### Denoising Flow
 
-- A pretrained `LitScoreNet` gives the **prior score** (∇ log p of atomic structures).
-- A `guidance_model` + reference target (from `--ref-path` or `--exp-data`) defines a **likelihood gradient**: `-(ρ/‖·‖) · ∂‖target − pred‖²/∂pos`.
-- `_denoise_by_sde` runs a reverse SDE step: `pos ← pos + (f(t)·pos − g²(t)·(prior + likelihood))·dt + g(t)·noise`.
-- Positions: `float32 (N, 3)` in Cartesian coords; cell: `float32 (3, 3)`; pbc always True.
-- ASE ↔ tensor conversion: `glass.lit.functions.get_atoms.initialize_atoms(atoms) → (Z_list, one_hot_species, pos, cell)`.
+1. Pretrained `LitScoreNet` gives **prior score** (∇ log p)
+2. `guidance_model` + reference defines **likelihood gradient**
+3. Reverse SDE: `pos ← pos + (f(t)·pos − g²(t)·(prior + likelihood))·dt + g(t)·noise`
+4. ASE ↔ tensor: `glass.lit.functions.get_atoms.initialize_atoms(atoms)`
 
-### Adding a new guidance (planned work)
+### Metrics Module
 
-All existing guidance modules expose `forward(pos, species, cell)` returning a predicted feature. A Tersoff-based guidance (`DifferentiableTersoff`) would wrap `TorchTersoff.energy` and return a scalar energy. It plugs into `LikelihoodScore` (cli.py:1313–1358). The plan file at `/Users/dskoda/.claude/plans/the-current-repository-has-stateful-karp.md` describes the intended refactor to support combinable (list-of-specs) guidance and an optional post-denoising ASE relaxation.
+**PDF Normalization**: `g(r) = (V/N²) × hist / (4πr²Δr)`
+- Ensures g(r) → 1 as r → ∞ (bulk limit)
+- Gaussian smoothing optional (default σ=0.15 Å)
 
-### Single-species Tersoff constraint
+**Coordination Cutoff**: Auto-detected from PDF first minimum
+- Fallback: 1.3× first peak position
 
-`TorchTersoff.__init__` explicitly rejects parameter dicts with more than one key or with non-homogeneous `(A, A, A)` keys. Any multi-species extension has to change that check plus the energy code (currently `self.params` is a single object looked up once, not per-pair).
+**Error Metrics**:
+- PDF/ADF: RMSE, MAE, area between curves, cosine similarity, R-chi²
+- Coordination: EMD (Wasserstein), histogram RMSE
+- Peak: position error, height error
 
-### ASE-compatibility quirk (non-obvious)
+### Tersoff Potential Notes
 
-The installed `ase.calculators.tersoff` (3.25.0) computes the bond-order exponential as `arg = lambda3 * (r_ij - r_ik)**m` in `calc_bond_order` (line ~416). Our energy matches the **installed** ASE formula. For Si diamond `r_ij == r_ik` so the distinction is invisible; for the disordered 216-atom snapshot it accounts for a ~3.6 eV energy difference.
+- **Single-species constraint**: Only homogeneous `(A, A, A)` keys supported
+- **ASE compatibility**: Energy matches ASE 3.25.0 formula
+- **Forces**: Torch autograd (correct), not ASE analytical forces
 
-ASE's own **analytical** forces are inconsistent with its energy (the derivative code was not updated to match the energy change), so ASE's `get_forces()` disagrees with ASE's own `calculate_numerical_forces()` by up to ~6.8 eV/Å on the snapshot. Torch autograd is the correct gradient. Tests validate autograd against a finite-difference of our own torch energy on a random subset of atoms — do **not** replace this with a comparison against ASE's analytical forces.
+### Environment Variables
 
-### Test fixtures
+- `KMP_DUPLICATE_LIB_OK=TRUE` — Required on macOS when mixing PyTorch and SciPy-backed ASE
 
-`./tests/data/` holds `Si_2.5_00.xyz` (216-atom disordered Si snapshot, orthorhombic cell, PBC on). The test file imports ASE **before** torch to avoid an OpenMP init abort on macOS.
+## Dependencies
 
-### Packaging
+**Core**: `torch`, `ase`, `numpy`, `click`, `scipy`
 
-Single distribution: `./pyproject.toml` defines the `glass` package with console script `glass = "glass.cli:glass"`. Runtime deps: `torch`, `ase`, `numpy`, `click`, `lightning`, `torch-geometric`, `scikit-learn`, `scipy`. Two small pieces of functionality (`glass.nn`, `glass.diffusion`) were ported from the LLNL `graphite` package so glass has no external graphite dependency. Optional extras: `[test]` for pytest, `[plot]` for `matplotlib`/`seaborn`/`tensorboard`, `[diffraction]` for `DebyeCalculator` (kept optional because it pins Python `<3.12` and would block install on newer Python versions).
+**Training**: `lightning`, `torch-geometric`, `scikit-learn`
+
+**Optional**:
+- `[test]`: pytest
+- `[plot]`: matplotlib, seaborn, tensorboard
+- `[diffraction]`: DebyeCalculator (pins Python <3.12)
+
+## Adding New Features
+
+### New Guidance Type
+
+1. Create `DifferentiableXXX` in `glass.lit/modules/`
+2. Expose `forward(pos, species, cell) → predicted_feature`
+3. Wire into `LikelihoodScore` in `cli.py`
+
+### New Error Metric
+
+1. Add function to `glass/metrics/errors.py`
+2. Function signature: `metric_name(ref: Metrics, target: Metrics) → float`
+3. Add to `compute_all_errors()`
+4. Update CLI if needed
+
+## Key Files
+
+- `glass/cli.py` — Main CLI entry points
+- `glass/experiment.py` — Experiment configuration management
+- `glass/lit/modules/prior.py` — ScoreNet model
+- `glass/metrics/` — All structural analysis
+- `tests/test_metrics.py` — Metrics tests
+- `tests/test_tersoff.py` — Tersoff tests
