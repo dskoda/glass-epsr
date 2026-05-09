@@ -77,55 +77,133 @@ class TorchTersoff:
         j_idx: torch.Tensor,
         shift_vec: torch.Tensor,
     ) -> torch.Tensor:
-        p = self.params
+        """Total Tersoff energy from an enumerated directed neighbour list.
 
-        r_ij_vec = positions[j_idx] + shift_vec - positions[i_idx]  # (P, 3)
+        Implements the segmented triple-sum over shared-source pairs
+        without ever allocating a (P, P) mask. For each source atom i,
+        zeta_{ij} = sum_{k ∈ nbrs(i), k != j} f_c(r_ik) · g(θ_{ijk}) ·
+        exp(λ₃·(r_ij − r_ik)^m). We pack per-atom neighbour slices into a
+        (N_src, n_max, 3) padded tensor and sum along a masked k axis, so
+        peak memory is O(N · n_max²) instead of O(P²).
+        """
+        p = self.params
+        device = positions.device
+        dtype = positions.dtype
+        P = int(i_idx.shape[0])
+
+        if P == 0:
+            return torch.zeros((), dtype=dtype, device=device)
+
+        # Sort pairs by source atom i so pairs with the same i are
+        # contiguous — this lets us build the padded (N_src, n_max)
+        # layout with a single gather.
+        sort_idx = torch.argsort(i_idx, stable=True)
+        i_sorted = i_idx[sort_idx]
+        j_sorted = j_idx[sort_idx]
+        shift_sorted = shift_vec[sort_idx]
+
+        r_ij_vec = positions[j_sorted] + shift_sorted - positions[i_sorted]
         r_ij = torch.linalg.norm(r_ij_vec, dim=-1)  # (P,)
 
         fc_ij = self._fc(r_ij, p.R, p.D)
 
-        # zeta_ij: for each pair p, sum over pairs q with same i_q == i_p, q != p.
-        # Dense (P, P) mask.
-        same_i = i_idx.unsqueeze(0) == i_idx.unsqueeze(1)  # (P, P): [pair, k-pair]
-        not_same_pair = ~torch.eye(
-            i_idx.shape[0], dtype=torch.bool, device=positions.device
+        # Per-source counts and offsets.
+        # unique_i gives the source-atom id for each active group; inv
+        # maps each pair to its group index in [0, N_src).
+        unique_i, inv, counts = torch.unique_consecutive(
+            i_sorted, return_inverse=True, return_counts=True
         )
-        triple_mask = same_i & not_same_pair  # (P, K)
+        N_src = int(unique_i.shape[0])
+        n_max = int(counts.max().item())
 
-        # r_ik for every "k-pair"
-        r_ik_vec = r_ij_vec  # alias: pair q has r_{i_q, j_q}; we reuse
-        r_ik = r_ij
+        # Within-group position (0, 1, ..., n_i-1) for each pair.
+        # starts[g] is the first pair index of group g in the sorted
+        # order; pos_in_group = arange(P) - starts[inv].
+        starts = torch.cumsum(counts, dim=0) - counts  # (N_src,)
+        pos_in_group = (
+            torch.arange(P, device=device) - starts[inv]
+        )  # (P,)
 
-        # Broadcast: for each pair p with vector r_ij_p (P,3), against all k r_ik_q (K,3)
-        # We want cos(theta) = (r_ij_p . r_ik_q) / (r_ij_p * r_ik_q)
-        # Shapes: r_ij_vec (P,3), r_ik_vec (K,3)
-        dot = r_ij_vec @ r_ik_vec.T  # (P, K)
-        norms = r_ij.unsqueeze(1) * r_ik.unsqueeze(0)  # (P, K)
-        costheta = dot / norms
+        # Gather the P pairs into a padded (N_src, n_max, *) layout.
+        # We need a "slot" index for each pair = (group, pos_in_group).
+        # A sentinel slot collects nothing: out-of-range entries in the
+        # padded tensors stay at zero.
+        flat_slot = inv * n_max + pos_in_group  # (P,)
 
-        fc_ik = self._fc(r_ik, p.R, p.D).unsqueeze(0).expand_as(dot)  # (P, K)
-        g_theta = self._gijk(costheta, p)
+        def _scatter_into_padded(values: torch.Tensor) -> torch.Tensor:
+            """values: (P, ...) -> (N_src, n_max, ...)."""
+            trailing = values.shape[1:]
+            padded = values.new_zeros((N_src * n_max, *trailing))
+            padded.index_copy_(0, flat_slot, values)
+            return padded.view(N_src, n_max, *trailing)
 
-        delta_r = r_ij.unsqueeze(1) - r_ik.unsqueeze(0)  # (P, K)
-        # Matches installed ase.calculators.tersoff: arg = lambda3 * (r_ij - r_ik)^m
-        arg = p.lambda3 * delta_r**p.m
-        ex_delr = self._safe_exp(arg)
+        j_pad = torch.full(
+            (N_src * n_max,), -1, dtype=torch.long, device=device
+        )
+        j_pad.index_copy_(0, flat_slot, j_sorted)
+        j_pad = j_pad.view(N_src, n_max)
 
-        term = fc_ik * g_theta * ex_delr
-        term = torch.where(triple_mask, term, torch.zeros_like(term))
-        zeta = term.sum(dim=1)  # (P,)
+        r_ij_vec_pad = _scatter_into_padded(r_ij_vec)    # (N, n_max, 3)
+        r_ij_pad = _scatter_into_padded(r_ij)            # (N, n_max)
 
-        # bond order
+        # Valid mask: which slots actually hold a pair.
+        slot_mask = torch.zeros(
+            N_src * n_max, dtype=torch.bool, device=device
+        )
+        slot_mask[flat_slot] = True
+        slot_mask = slot_mask.view(N_src, n_max)         # (N, n_max)
+
+        # Now compute zeta for every (i, j) = (g, a) against every
+        # candidate k = (g, b) using a (N, n_max, n_max) local
+        # broadcast. Peak memory: N_src · n_max² · (a few floats). For
+        # Si at typical densities n_max is ~6, so even N_src = 10_000
+        # this is 10 000 · 36 · 8 · 4 B ≈ 12 MB.
+        rij_a = r_ij_vec_pad.unsqueeze(2)                 # (N, a, 1, 3)
+        rij_b = r_ij_vec_pad.unsqueeze(1)                 # (N, 1, b, 3)
+        r_a = r_ij_pad.unsqueeze(2)                       # (N, a, 1)
+        r_b = r_ij_pad.unsqueeze(1)                       # (N, 1, b)
+
+        dot = (rij_a * rij_b).sum(dim=-1)                 # (N, a, b)
+        # Avoid 0/0 at padding slots; we mask later.
+        denom = r_a * r_b
+        denom = torch.where(
+            denom > 0, denom, torch.ones_like(denom)
+        )
+        costheta = dot / denom
+
+        fc_ik = self._fc(r_b, p.R, p.D)                   # (N, 1, b)
+        g_theta = self._gijk(costheta, p)                 # (N, a, b)
+
+        delta_r = r_a - r_b                               # (N, a, b)
+        arg = p.lambda3 * delta_r ** p.m
+        ex_delr = self._safe_exp(arg)                     # (N, a, b)
+
+        triple_term = fc_ik * g_theta * ex_delr           # (N, a, b)
+
+        # Mask out (i) invalid a slots, (ii) invalid b slots, and
+        # (iii) the a == b diagonal (k != j).
+        mask_a = slot_mask.unsqueeze(2)                   # (N, a, 1)
+        mask_b = slot_mask.unsqueeze(1)                   # (N, 1, b)
+        eye_ab = torch.eye(
+            n_max, dtype=torch.bool, device=device
+        ).unsqueeze(0)                                    # (1, a, b)
+        valid_ab = mask_a & mask_b & (~eye_ab)
+        triple_term = torch.where(
+            valid_ab, triple_term, torch.zeros_like(triple_term)
+        )
+
+        zeta_pad = triple_term.sum(dim=2)                 # (N, a)
+
+        # Scatter zeta back to pair order.
+        zeta = zeta_pad.reshape(-1).gather(0, flat_slot)  # (P,) sorted order
+
         tmp = p.beta * zeta
-        # Guard zeta == 0: tmp**n -> 0 for n positive non-integer when tmp=0,
-        # but tmp**(n-1) in analytical derivative would blow up. Handled there.
-        b_ij = (1.0 + tmp**p.n) ** (-1.0 / (2.0 * p.n))
+        b_ij = (1.0 + tmp ** p.n) ** (-1.0 / (2.0 * p.n))
 
         repulsive = p.A * torch.exp(-p.lambda1 * r_ij)
         attractive = -p.B * torch.exp(-p.lambda2 * r_ij)
 
-        V_ij = fc_ij * (repulsive + b_ij * attractive)  # (P,)
-        # Sum over directed pairs, multiply by 0.5 for the pair-double-counting.
+        V_ij = fc_ij * (repulsive + b_ij * attractive)    # (P,) sorted
         return 0.5 * V_ij.sum()
 
     def energy(
