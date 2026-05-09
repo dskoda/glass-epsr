@@ -28,6 +28,7 @@ plot = [
     "seaborn>=0.12",
     "tensorboard>=2.12",
 ]
+hpo = ["optuna>=3.5"]
 
 [project.scripts]
 glass = "glass.cli:glass"

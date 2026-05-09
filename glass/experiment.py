@@ -50,12 +50,15 @@ class ExperimentConfig:
     # Checkpoint settings
     save_top_k: int = 3
     
-    # Generation parameters (for inference)
+    # Generation parameters (for inference).
+    # The tmin/tmax/tstep defaults below come from the HPO study
+    # ``glass_coord_v1`` (scripts/hpo_generate.py); best 10-seed replay:
+    # coord_emd=0.074, pdf_rmse=0.044, adf_rmse=0.053.
     checkpoint: str = "best"  # "best", "last", or specific filename
     n_runs: int = 10
-    tmin: float = 0.001
-    tmax: float = 1.0
-    tstep: int = 256
+    tmin: float = 8.56e-4
+    tmax: float = 0.593
+    tstep: int = 512
     save_traj: bool = False
     device: str = "cuda:0"
     
@@ -77,14 +80,23 @@ class ExperimentConfig:
     qstep: float = 0.1  # XRD/ND
     biso: float = 1.5  # XRD/ND
     
-    # Sampler refinements (all inference-time)
-    n_corr: int = 0
-    corr_step_size: float = 0.15
+    # Tersoff-guidance defaults (from HPO study glass_coord_v1).
+    tersoff_guidance: bool = True
+    tersoff_lambda: float = 0.263
+    tersoff_schedule: str = "constant"
+    tersoff_t_gate: float = 0.486
+    tersoff_clamp: float = 10.0
+
+    # Sampler refinements (from HPO study glass_coord_v1).
+    n_corr: int = 1
+    corr_step_size: float = 0.269
     corr_use_tersoff: bool = True
     corr_t_gate: float = 0.6
-    t_schedule_rho: float = 1.0
+    t_schedule_rho: float = 0.545
 
-    # Simulated-annealing post-relaxation
+    # Simulated-annealing post-relaxation. The HPO study converged on
+    # N_anneal=0 — the Langevin corrector already captures what SA would do,
+    # so SA is disabled by default but the knobs remain tunable.
     sa_n_steps: int = 0
     sa_T0: float = 1e-2
     sa_T_end: float = 1e-5

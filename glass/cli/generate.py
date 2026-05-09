@@ -218,35 +218,31 @@ GUIDANCE TYPES:
 # Tersoff (empirical-potential) guidance
 @click.option(
     "--tersoff-guidance/--no-tersoff-guidance",
-    default=False,
+    default=None,
     help="Add Tersoff-energy gradient as an auxiliary score term during the reverse SDE.",
 )
 @click.option(
     "--tersoff-lambda",
     type=float,
-    default=0.05,
-    show_default=True,
+    default=None,
     help="[tersoff] Weight lambda_0 for the Tersoff guidance schedule.",
 )
 @click.option(
     "--tersoff-schedule",
     type=click.Choice(["constant", "linear", "sigmoid"]),
-    default="linear",
-    show_default=True,
+    default=None,
     help="[tersoff] Shape of lambda(t).",
 )
 @click.option(
     "--tersoff-t-gate",
     type=float,
-    default=0.3,
-    show_default=True,
+    default=None,
     help="[tersoff] Gate time for the sigmoid schedule.",
 )
 @click.option(
     "--tersoff-clamp",
     type=float,
-    default=10.0,
-    show_default=True,
+    default=None,
     help="[tersoff] Per-atom guidance-norm clamp (Å units of autograd/N).",
 )
 # Langevin predictor-corrector
@@ -389,6 +385,20 @@ def generate(
     qmax = qmax or config.qmax
     qstep = qstep or config.qstep
     biso = biso or config.biso
+    # Tersoff guidance
+    tersoff_guidance = (
+        tersoff_guidance if tersoff_guidance is not None else config.tersoff_guidance
+    )
+    tersoff_lambda = (
+        tersoff_lambda if tersoff_lambda is not None else config.tersoff_lambda
+    )
+    tersoff_schedule = tersoff_schedule or config.tersoff_schedule
+    tersoff_t_gate = (
+        tersoff_t_gate if tersoff_t_gate is not None else config.tersoff_t_gate
+    )
+    tersoff_clamp = (
+        tersoff_clamp if tersoff_clamp is not None else config.tersoff_clamp
+    )
     # Sampler refinements
     n_corr = n_corr if n_corr is not None else config.n_corr
     corr_step_size = corr_step_size if corr_step_size is not None else config.corr_step_size
