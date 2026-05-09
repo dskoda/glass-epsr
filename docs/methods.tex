@@ -1,0 +1,177 @@
+\section{Methods}
+\label{sec:methods}
+
+\subsection{Score-based prior}
+\label{sec:prior}
+
+We model the distribution of atomic coordinates of amorphous silicon with a
+score-based generative model trained on a variance-exploding stochastic
+differential equation (VE-SDE)~\cite{song2021score}. Let
+$\mathbf{x}\in\mathbb{R}^{N\times 3}$ denote the Cartesian positions of $N$
+atoms in a periodic cell $\mathbf{L}\in\mathbb{R}^{3\times 3}$. The forward
+SDE is
+\begin{equation}
+    \mathrm{d}\mathbf{x} = g(t)\,\mathrm{d}\mathbf{w},
+    \qquad
+    \sigma(t) = k\,t,
+    \qquad
+    g(t) = \sqrt{2 k^{2} t},
+    \label{eq:fwd-sde}
+\end{equation}
+with noise scale $k=0.8$ and $t\in[t_{\min},t_{\max}]$. Training minimizes the
+denoising score-matching objective
+$
+    \mathcal{L}
+    = \mathbb{E}_{t,\mathbf{x},\bm{\varepsilon}}\!\left[
+        \left\lVert \sigma(t)\,s_{\theta}(\mathbf{x}+\sigma(t)\bm{\varepsilon},t)
+                    + \bm{\varepsilon}\right\rVert_{2}^{2}
+      \right]
+$
+against an exponential moving average of the network weights. The network
+$s_\theta$ is a message-passing graph neural network with periodic radius
+graphs (cutoff $5.0$~\AA); further architectural details are in the code
+repository.
+
+Samples are drawn by integrating the reverse SDE
+\begin{equation}
+    \mathrm{d}\mathbf{x}
+    = -g^{2}(t)\,\nabla_{\mathbf{x}}\log p_t(\mathbf{x})\,\mathrm{d}t
+      + g(t)\,\mathrm{d}\bar{\mathbf{w}},
+    \label{eq:reverse-sde}
+\end{equation}
+backward in time from $t_{\max}$ to $t_{\min}$ with $s_\theta\approx
+\nabla\log p_t$.
+
+\subsection{Tersoff-energy guidance}
+\label{sec:tersoff}
+
+We augment the learned prior with an empirical potential--based guidance
+term that plays a role analogous to the empirical potential in EPSR~\cite{soper2005empirical}
+but is embedded directly inside the generative trajectory rather than applied
+as a post-hoc refinement loop. Let $E(\mathbf{x};\mathbf{L})$ be the single-species
+Tersoff potential~\cite{tersoff1988new} for silicon, reimplemented here in
+PyTorch so that $\nabla_{\mathbf{x}}E$ is available through automatic
+differentiation. We define a per-atom guidance vector
+\begin{equation}
+    \mathbf{u}(\mathbf{x})
+    = -\operatorname{clip}\!\left(
+        \frac{1}{N}\,\nabla_{\mathbf{x}} E(\mathbf{x};\mathbf{L}),\,
+        c_{\mathrm{clamp}}
+      \right),
+    \label{eq:tersoff-guide}
+\end{equation}
+where $\operatorname{clip}(\cdot,c)$ rescales any per-atom component whose
+$\ell_2$ norm exceeds $c$ back to norm $c$; we set $c_{\mathrm{clamp}}=10$.
+Normalization by $N$ keeps the guidance size-independent, and clipping
+suppresses divergences at high noise levels where atoms can be arbitrarily
+close. A time-dependent weight $\lambda(t)$ modulates the strength of this
+term. We support three weighting schedules,
+\begin{equation}
+    \lambda(t) =
+    \begin{cases}
+        \lambda_0 & \text{(constant)} \\
+        \lambda_0\,\max\!\left(0,\,1-t/t_{\max}\right) & \text{(linear)} \\
+        \lambda_0\,\mathrm{sigmoid}\!\left(-\kappa(t-t_{\mathrm{gate}})\right) & \text{(sigmoid)}
+    \end{cases}.
+    \label{eq:tersoff-schedule}
+\end{equation}
+The linear and sigmoid variants suppress guidance in the high-noise regime
+where structures are far from any physical basin and the potential gradient
+is dominated by close contacts.
+
+\subsection{Predictor--corrector sampling with power-law time grid}
+\label{sec:sampler}
+
+We discretize Eq.~\eqref{eq:reverse-sde} with a predictor--corrector scheme
+following~\cite{song2021score}. The predictor is Euler--Maruyama applied to
+the reverse SDE with the guided score
+$\tilde{s}_\theta(\mathbf{x},t) = s_\theta(\mathbf{x},t) + \lambda(t)\,\mathbf{u}(\mathbf{x})$.
+Each predictor step is optionally followed by $n_{\mathrm{corr}}$ Langevin
+corrector steps,
+\begin{equation}
+    \mathbf{x}
+    \leftarrow \mathbf{x}
+    + \epsilon_c\,\tilde{s}_\theta(\mathbf{x},t)
+    + \sqrt{2\epsilon_c}\,\bm{\xi},
+    \qquad
+    \epsilon_c = \eta\,\sigma(t)^{2},\qquad \bm{\xi}\sim\mathcal{N}(0,\mathbf{I}).
+    \label{eq:corrector}
+\end{equation}
+The corrector is gated to the low-noise regime via a threshold
+$t\le\gamma\, t_{\max}$; at high $t$ the effective step
+$\epsilon_c\propto\sigma(t)^{2}$ grows and can destabilize sampling, while at
+low $t$ it provides additional mixing where bonds are forming.
+
+We discretize time with a power-law trajectory rather than the uniform grid
+used in vanilla VE-SDE samplers,
+\begin{equation}
+    t_i \;=\; t_{\min} + (t_{\max}-t_{\min})\left(\frac{N_t-i}{N_t}\right)^{\rho},
+    \qquad i = 0,\dots,N_t-1.
+    \label{eq:power-law-ts}
+\end{equation}
+With $\rho=1$ this reduces to a linear spacing; with $\rho<1$ the step size
+$|t_{i+1}-t_i|$ grows as $i$ increases, concentrating integration points at
+large $t$ where the learned score is weak, and taking larger steps at small
+$t$ where the corrector dominates.
+
+\subsection{Hyperparameter optimization}
+\label{sec:hpo}
+
+Inference-time hyperparameters were selected by Bayesian optimization with a
+tree-structured Parzen estimator (TPE)~\cite{bergstra2011algorithms} and
+median pruning, implemented with Optuna~\cite{akiba2019optuna}. For each
+trial, three independent seeds were drawn; the per-seed score was reported
+after each seed so that trials whose first seed fell below the running
+median were pruned without wasting compute on seeds two and three. The
+objective was the mean over seeds of
+\begin{equation}
+    \mathcal{J}
+    = 1.0\cdot\mathrm{EMD}_{\mathrm{CN}}
+    + 0.5\cdot\mathrm{RMSE}_{g(r)}
+    + 0.25\cdot\mathrm{RMSE}_{\mathrm{ADF}},
+    \label{eq:hpo-objective}
+\end{equation}
+where $\mathrm{EMD}_{\mathrm{CN}}$ is the earth-mover's distance between the
+coordination-number distributions of the sampled and reference structures,
+and the two RMSEs are computed on the pair- and bond-angle distribution
+functions. Coordination cutoffs were auto-selected from the first minimum of
+the PDF. The weights prioritize the coordination statistic, which is the
+most sensitive diagnostic of tetrahedral order in amorphous Si.
+
+The search space covered the number of integration steps
+$N_t\in\{64,128,256,512\}$; $t_{\min}\in[10^{-4},5\cdot10^{-2}]$ (log scale);
+$t_{\max}\in[0.5,1.0]$; the power-law exponent $\rho\in[0.5,3.0]$; the
+Tersoff-guidance strength $\lambda_0\in[0,0.3]$, schedule family, and gate
+time $t_{\mathrm{gate}}\in[0.1,0.8]$; the number of corrector steps
+$n_{\mathrm{corr}}\in\{0,1,2,3\}$ and step scale $\eta\in[0.05,0.5]$; and an
+optional simulated-annealing tail with $N_{\mathrm{ann}}\in\{0,50,100,200\}$
+steps that we found converged to $N_{\mathrm{ann}}=0$ in the optimum and is
+therefore omitted in the rest of this work. Two hundred trials were run in
+parallel across four NVIDIA A6000 GPUs.
+
+\subsection{Final sampler configuration}
+\label{sec:final-config}
+
+The configuration selected by the optimizer uses a power-law time grid with
+$N_t=512$, $\rho\approx 0.545$, $t_{\min}\approx 8.6\cdot10^{-4}$, and
+$t_{\max}\approx 0.593$; a constant-in-$t$ Tersoff weight $\lambda_0\approx
+0.263$; one Langevin corrector step per predictor step with $\eta\approx
+0.269$, gated to $t\le 0.6\,t_{\max}$; and no simulated-annealing tail. The
+corrector gate activates at integration step $i\approx 306$ out of $512$, so
+that deterministic motion dominates only during the final $\sim\!40\%$ of
+the trajectory. This is consistent with the observation~\cite{karras2022edm}
+that the bulk of sample quality is determined by the low-noise tail of the
+reverse SDE.
+
+\subsection{Evaluation}
+\label{sec:eval}
+
+Generated structures were compared against a reference amorphous-Si
+configuration by computing (i) the pair-distribution function $g(r)$ on a
+200-bin grid with cutoff $8$~\AA, (ii) the bond-angle distribution function
+with a triplet cutoff set to the first minimum of $g(r)$, and (iii) the
+coordination-number distribution with the same cutoff. We report root-mean
+squared errors of $g(r)$ and of the ADF, together with the earth-mover's
+distance between coordination histograms; these are the three quantities
+that enter the HPO objective of Eq.~\eqref{eq:hpo-objective}. Mean values
+are reported over ten independent seeds.
