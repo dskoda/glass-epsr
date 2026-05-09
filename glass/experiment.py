@@ -77,6 +77,20 @@ class ExperimentConfig:
     qstep: float = 0.1  # XRD/ND
     biso: float = 1.5  # XRD/ND
     
+    # Sampler refinements (all inference-time)
+    n_corr: int = 0
+    corr_step_size: float = 0.15
+    corr_use_tersoff: bool = True
+    corr_t_gate: float = 0.6
+    t_schedule_rho: float = 1.0
+
+    # Simulated-annealing post-relaxation
+    sa_n_steps: int = 0
+    sa_T0: float = 1e-2
+    sa_T_end: float = 1e-5
+    sa_lr: float = 1e-3
+    sa_lr_clamp: float = 0.2
+
     # Infrastructure
     accelerator: str = "gpu"
     strategy: str = "ddp_find_unused_parameters_true"

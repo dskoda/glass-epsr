@@ -14,6 +14,8 @@ from glass.lit.modules.tersoff_guidance import (
     TersoffEnergyGuidance,
     TersoffSchedule,
 )
+from glass.diffusion.schedules import power_law_ts
+from glass.diffusion.annealing import make_anneal_fn
 from glass.utils.atoms_utils import (
     atoms_to_device,
     compute_prior_score,
@@ -247,6 +249,68 @@ GUIDANCE TYPES:
     show_default=True,
     help="[tersoff] Per-atom guidance-norm clamp (Å units of autograd/N).",
 )
+# Langevin predictor-corrector
+@click.option(
+    "--n-corr",
+    type=int,
+    default=None,
+    help="Number of Langevin corrector steps per predictor step. 0 disables.",
+)
+@click.option(
+    "--corr-step-size",
+    type=float,
+    default=None,
+    help="Corrector step size (effective step = corr_step_size * sigma(t)^2).",
+)
+@click.option(
+    "--corr-use-tersoff/--no-corr-use-tersoff",
+    default=None,
+    help="Include Tersoff gradient inside the corrector loop.",
+)
+@click.option(
+    "--corr-t-gate",
+    type=float,
+    default=None,
+    help="Skip corrector when t > corr_t_gate * t_max.",
+)
+# Non-linear t schedule
+@click.option(
+    "--t-schedule-rho",
+    type=float,
+    default=None,
+    help="Power-law exponent for the t trajectory (1.0 = linspace, >1 concentrates near t=0).",
+)
+# Simulated-annealing post-relaxation
+@click.option(
+    "--sa-n-steps",
+    type=int,
+    default=None,
+    help="Number of simulated-annealing steps after the reverse SDE. 0 disables.",
+)
+@click.option(
+    "--sa-t0",
+    type=float,
+    default=None,
+    help="[SA] Initial temperature.",
+)
+@click.option(
+    "--sa-t-end",
+    type=float,
+    default=None,
+    help="[SA] Final temperature.",
+)
+@click.option(
+    "--sa-lr",
+    type=float,
+    default=None,
+    help="[SA] Step size on the Tersoff force.",
+)
+@click.option(
+    "--sa-lr-clamp",
+    type=float,
+    default=None,
+    help="[SA] Per-atom per-step displacement cap (Å).",
+)
 def generate(
     experiment_path,
     inits,
@@ -278,6 +342,16 @@ def generate(
     tersoff_schedule,
     tersoff_t_gate,
     tersoff_clamp,
+    n_corr,
+    corr_step_size,
+    corr_use_tersoff,
+    corr_t_gate,
+    t_schedule_rho,
+    sa_n_steps,
+    sa_t0,
+    sa_t_end,
+    sa_lr,
+    sa_lr_clamp,
 ):
     """Generate structures using trained score model."""
     import ase
@@ -315,6 +389,21 @@ def generate(
     qmax = qmax or config.qmax
     qstep = qstep or config.qstep
     biso = biso or config.biso
+    # Sampler refinements
+    n_corr = n_corr if n_corr is not None else config.n_corr
+    corr_step_size = corr_step_size if corr_step_size is not None else config.corr_step_size
+    corr_use_tersoff = (
+        corr_use_tersoff if corr_use_tersoff is not None else config.corr_use_tersoff
+    )
+    corr_t_gate = corr_t_gate if corr_t_gate is not None else config.corr_t_gate
+    t_schedule_rho = (
+        t_schedule_rho if t_schedule_rho is not None else config.t_schedule_rho
+    )
+    sa_n_steps = sa_n_steps if sa_n_steps is not None else config.sa_n_steps
+    sa_t0 = sa_t0 if sa_t0 is not None else config.sa_T0
+    sa_t_end = sa_t_end if sa_t_end is not None else config.sa_T_end
+    sa_lr = sa_lr if sa_lr is not None else config.sa_lr
+    sa_lr_clamp = sa_lr_clamp if sa_lr_clamp is not None else config.sa_lr_clamp
     
     # Resolve output directory
     if outdir is None:
@@ -371,6 +460,34 @@ def generate(
             t_gate=tersoff_t_gate,
         )
 
+    # Simulated-annealing post-relaxation: SA always runs on the Tersoff PES,
+    # so auto-create a guidance instance if the user did not enable Tersoff.
+    anneal_fn = None
+    sa_guidance_fn = tersoff_guidance_fn
+    if sa_n_steps and sa_n_steps > 0:
+        if sa_guidance_fn is None:
+            sa_guidance_fn = TersoffEnergyGuidance(clamp_norm=tersoff_clamp)
+        click.echo(
+            f"SA tail: n_steps={sa_n_steps} T0={sa_t0} T_end={sa_t_end} "
+            f"lr={sa_lr} lr_clamp={sa_lr_clamp}"
+        )
+        anneal_fn = make_anneal_fn(
+            tersoff_guidance=sa_guidance_fn,
+            n_steps=sa_n_steps,
+            T0=sa_t0,
+            T_end=sa_t_end,
+            lr=sa_lr,
+            lr_clamp=sa_lr_clamp,
+        )
+
+    if n_corr and n_corr > 0:
+        click.echo(
+            f"Corrector: n_corr={n_corr} step_size={corr_step_size} "
+            f"use_tersoff={corr_use_tersoff} t_gate={corr_t_gate}"
+        )
+    if t_schedule_rho != 1.0:
+        click.echo(f"Non-linear t schedule: rho={t_schedule_rho}")
+
     # Setup guidance model if conditional
     guidance_model = None
     if guidance_type:
@@ -422,8 +539,8 @@ def generate(
         raise click.ClickException(f"No .xyz files found in {inits}")
     click.echo(f"Found {len(init_files)} initial structures")
     
-    # Time steps
-    ts_torch = torch.linspace(tmax, tmin, tstep, device=device)
+    # Time steps (power-law; rho=1.0 == linspace)
+    ts_torch = power_law_ts(tmin, tmax, tstep, rho=t_schedule_rho, device=device)
     
     # Progress callback for denoising
     def progress_callback(step, t, p_norm, l_norm=None, target_norm=None):
@@ -485,6 +602,15 @@ def generate(
                 f"_tmax{tmax}_nsteps{tstep}"
             )
             run_outdir = os.path.join(outdir, sub_id, run_tag)
+        extra_tag = []
+        if n_corr and n_corr > 0:
+            extra_tag.append(f"corr{n_corr}s{corr_step_size:g}")
+        if t_schedule_rho != 1.0:
+            extra_tag.append(f"rho{t_schedule_rho:g}")
+        if sa_n_steps and sa_n_steps > 0:
+            extra_tag.append(f"sa{sa_n_steps}lr{sa_lr:g}")
+        if extra_tag:
+            run_outdir = os.path.join(run_outdir, "_".join(extra_tag))
         os.makedirs(run_outdir, exist_ok=True)
         
         # Prior function wrapper
@@ -509,6 +635,11 @@ def generate(
                 progress_fn=progress_callback if guidance_type else None,
                 tersoff_guidance=tersoff_guidance_fn,
                 tersoff_schedule=tersoff_schedule_fn,
+                n_corr=n_corr,
+                corr_step_size=corr_step_size,
+                corr_use_tersoff=corr_use_tersoff,
+                corr_t_gate=corr_t_gate,
+                anneal_fn=anneal_fn,
             )
             
             if save_traj:
