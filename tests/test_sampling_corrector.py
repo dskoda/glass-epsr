@@ -126,3 +126,91 @@ def test_n_corr_requires_score_fn_if_used():
             score_fn=None, likelihood_fn=None, ts=ts, diffuser=diffuser,
             n_corr=1,
         )
+
+
+class _StubLikelihood:
+    """Minimal LikelihoodScore stand-in: pulls pos toward a fixed target.
+
+    Returns the same ``(score, norm)`` contract as
+    ``glass.lit.modules.likelihood.LikelihoodScore.forward``: score shape
+    matches ``pos``, ``norm`` is a per-atom scalar column.
+    """
+
+    def __init__(self, target: torch.Tensor, rho: float):
+        self.target = target
+        self.rho = rho
+
+    def __call__(self, species, pos, cell, t, cutoff):
+        diff = pos - self.target
+        norm = diff.norm(dim=-1, keepdim=True)
+        return -self.rho * diff, norm
+
+
+def test_conditional_composition_runs_with_corrector():
+    """prior + stub_likelihood + corrector composes without NaN/Inf and
+    preserves shapes. Mirrors the unconditional-corrector test but with
+    ``likelihood_fn`` populated."""
+    diffuser = VarianceExplodingDiffuser(k=0.8)
+    species, pos0, cell = _random_setup(seed=1)
+    ts = torch.linspace(0.5, 1e-3, 16)
+    target = pos0.clone()
+    stub = _StubLikelihood(target=target, rho=5.0)
+
+    torch.manual_seed(0)
+    _, final = denoise_by_sde(
+        species, pos0.clone(), cell, cutoff=5.0,
+        score_fn=_zero_score, likelihood_fn=stub, ts=ts, diffuser=diffuser,
+        n_corr=1, corr_step_size=0.15, corr_t_gate=0.6,
+    )
+    assert final.shape == pos0.shape
+    assert torch.isfinite(final).all()
+
+
+def test_conditional_likelihood_pulls_pos_toward_target():
+    """With a large ``rho``, the stub likelihood should drag pos toward
+    ``target`` more than with ``rho=0`` (unconditional). This verifies the
+    ``p_score + l_score`` composition in ``denoise_by_sde`` actually wires
+    the likelihood into the predictor step."""
+    diffuser = VarianceExplodingDiffuser(k=0.8)
+    species, pos0, cell = _random_setup(seed=2)
+    ts = torch.linspace(0.3, 1e-3, 32)
+    target = torch.zeros_like(pos0)  # pull toward the origin
+
+    torch.manual_seed(99)
+    _, final_off = denoise_by_sde(
+        species, pos0.clone(), cell, 5.0,
+        _zero_score, _StubLikelihood(target, rho=0.0), ts, diffuser,
+    )
+    torch.manual_seed(99)
+    _, final_on = denoise_by_sde(
+        species, pos0.clone(), cell, 5.0,
+        _zero_score, _StubLikelihood(target, rho=50.0), ts, diffuser,
+    )
+
+    d_off = (final_off - target).norm(dim=-1).mean().item()
+    d_on = (final_on - target).norm(dim=-1).mean().item()
+    assert d_on < d_off, (d_on, d_off)
+
+
+def test_conditional_progress_callback_receives_l_norm():
+    """When ``likelihood_fn`` is set, the progress callback gets ``l_norm``
+    and ``target_norm`` kwargs (not ``t_norm``)."""
+    diffuser = VarianceExplodingDiffuser(k=0.8)
+    species, pos0, cell = _random_setup(seed=3)
+    ts = torch.linspace(0.2, 1e-3, 6)
+    stub = _StubLikelihood(target=pos0.clone(), rho=1.0)
+
+    kw_seen = []
+
+    def progress(**kw):
+        kw_seen.append(set(kw.keys()))
+
+    torch.manual_seed(4)
+    denoise_by_sde(
+        species, pos0.clone(), cell, 5.0,
+        _zero_score, stub, ts, diffuser, progress_fn=progress,
+    )
+    assert kw_seen, "progress callback never invoked"
+    for keys in kw_seen:
+        assert "l_norm" in keys and "target_norm" in keys, keys
+        assert "t_norm" not in keys

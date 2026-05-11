@@ -599,19 +599,19 @@ def generate(
             )
         
         # Run generation
-        run_outdir = os.path.join(outdir, sub_id)
+        tag_parts = []
         if guidance_type:
             rho_str = f"{int(rho)}" if rho == int(rho) else f"{rho:.2f}"
-            run_tag = f"{guidance_type}_rho{rho_str}_tmax{tmax}_nsteps{tstep}"
-            run_outdir = os.path.join(outdir, sub_id, run_tag)
+            tag_parts.append(f"{guidance_type}_rho{rho_str}")
         if tersoff_guidance:
-            lam_str = f"{tersoff_lambda:g}"
-            gate_str = f"{tersoff_t_gate:g}"
-            run_tag = (
-                f"tersoff_{tersoff_schedule}_lam{lam_str}_gate{gate_str}"
-                f"_tmax{tmax}_nsteps{tstep}"
+            tag_parts.append(
+                f"tersoff_{tersoff_schedule}_lam{tersoff_lambda:g}"
+                f"_gate{tersoff_t_gate:g}"
             )
-            run_outdir = os.path.join(outdir, sub_id, run_tag)
+        tag_parts.append(f"tmax{tmax}_nsteps{tstep}")
+        run_outdir = os.path.join(outdir, sub_id, "_".join(tag_parts)) \
+            if tag_parts else os.path.join(outdir, sub_id)
+
         extra_tag = []
         if n_corr and n_corr > 0:
             extra_tag.append(f"corr{n_corr}s{corr_step_size:g}")

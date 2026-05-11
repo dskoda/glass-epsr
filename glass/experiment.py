@@ -51,24 +51,30 @@ class ExperimentConfig:
     save_top_k: int = 3
     
     # Generation parameters (for inference).
-    # The tmin/tmax/tstep defaults below come from the HPO study
-    # ``glass_coord_v1`` (scripts/hpo_generate.py); best 10-seed replay:
-    # coord_emd=0.074, pdf_rmse=0.044, adf_rmse=0.053.
+    # Defaults come from the unified HPO study ``glass_unified_v1``
+    # (scripts/hpo_unified.py): top-5 consensus across trials that jointly
+    # optimise unconditional + PDF-conditional runs. Winning trial #125
+    # scored obj_uncond=0.039 / obj_cond=0.046, vs. the prior
+    # uncond-only HPO's 0.16 cond objective with rho=1000. The t-schedule
+    # exponent also flipped from 0.55 (concentrate at high noise) to 1.4
+    # (concentrate at low noise) and tstep dropped 4x.
     checkpoint: str = "best"  # "best", "last", or specific filename
     n_runs: int = 10
-    tmin: float = 8.56e-4
-    tmax: float = 0.593
-    tstep: int = 512
+    tmin: float = 1e-4
+    tmax: float = 0.54
+    tstep: int = 128
     save_traj: bool = False
     device: str = "cuda:0"
-    
-    # Guidance parameters (for conditional generation)
+
+    # Guidance parameters (for conditional generation).
+    # rho lowered ~25x: at rho=1000 the PDF gradient swamped Tersoff and
+    # coord_emd collapsed. rho ~ 35 balances all three score terms.
     guidance_type: Optional[str] = None  # "pdf", "adf", "xrd", "nd", "exafs", "xanes"
-    rho: float = 1000.0
+    rho: float = 35.0
     ref_path: Optional[str] = None
     exp_data: Optional[str] = None
     spec_model_path: Optional[str] = None
-    
+
     # Guidance-specific parameters
     bin_size: int = 100  # PDF
     angle_bins: int = 100  # ADF
@@ -79,20 +85,20 @@ class ExperimentConfig:
     qmax: float = 20.0  # XRD/ND
     qstep: float = 0.1  # XRD/ND
     biso: float = 1.5  # XRD/ND
-    
-    # Tersoff-guidance defaults (from HPO study glass_coord_v1).
+
+    # Tersoff-guidance defaults (unified HPO top-5 consensus).
     tersoff_guidance: bool = True
-    tersoff_lambda: float = 0.263
-    tersoff_schedule: str = "constant"
-    tersoff_t_gate: float = 0.486
+    tersoff_lambda: float = 0.22
+    tersoff_schedule: str = "linear"
+    tersoff_t_gate: float = 0.75
     tersoff_clamp: float = 10.0
 
-    # Sampler refinements (from HPO study glass_coord_v1).
+    # Sampler refinements (unified HPO top-5 consensus).
     n_corr: int = 1
-    corr_step_size: float = 0.269
+    corr_step_size: float = 0.13
     corr_use_tersoff: bool = True
-    corr_t_gate: float = 0.6
-    t_schedule_rho: float = 0.545
+    corr_t_gate: float = 0.37
+    t_schedule_rho: float = 1.4
 
     # Simulated-annealing post-relaxation. The HPO study converged on
     # N_anneal=0 — the Langevin corrector already captures what SA would do,
