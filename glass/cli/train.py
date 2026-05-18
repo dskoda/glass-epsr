@@ -1,189 +1,213 @@
-import glob
 import os
-
 import click
-import lightning as L
 import torch
-from lightning.pytorch.callbacks import TQDMProgressBar
+import lightning as L
+from lightning.pytorch.callbacks import TQDMProgressBar, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 
+from glass.experiment import Experiment, ExperimentConfig
 from glass.lit.datamodules import StructureSpecDataModule
-from glass.lit.modules import LitScoreNet
+from glass.lit.modules import LitScoreNet, LitSpecNet
+
+
+class BestCheckpoint(ModelCheckpoint):
+    """ModelCheckpoint with unique state key for best checkpoint."""
+    @property
+    def state_key(self) -> str:
+        return "best_checkpoint"
+
+
+class LastCheckpoint(ModelCheckpoint):
+    """ModelCheckpoint with unique state key for last checkpoint."""
+    @property
+    def state_key(self) -> str:
+        return "last_checkpoint"
 
 
 @click.command(
-    "train_score",
+    "train",
     help="""
-Train (or resume) a score-based generative model for atomic structures.
+Train a score-based generative model or spectral surrogate model.
 
-DATA:
-  SAMPLE_TAG determines the dataset location:
-    ./data/<sample_tag>/
+This unified command creates a complete experiment with organized directories
+for data, checkpoints, logs, and outputs.
 
-CHECKPOINTS:
-  Saved under:
-    ./models/<sample_tag>/
+EXPERIMENT STRUCTURE:
+    ./my_experiment/
+    ├── config.yaml          # All training parameters
+    ├── data/                # Training structures (*.xyz files)
+    ├── checkpoints/         # Model checkpoints
+    │   ├── best.ckpt       # Best validation checkpoint
+    │   ├── last.ckpt       # Most recent checkpoint
+    │   └── epoch_*.ckpt    # Intermediate checkpoints
+    └── logs/               # TensorBoard logs
+        └── version_*/
 
 EXAMPLES:
 
-  # Train from scratch (recommended defaults)
-  glass train_score Si_1.5_2.5_3.5 --num-species 2 --data-root /path/to/demo_Si/data
+  # Create new experiment and train
+  glass train ./my_experiment --model-type score --num-species 2
 
-  # Resume from latest checkpoint
-  glass train_score Si_1.5_2.5_3.5 --num-species 2 --data-root /path/to/demo_Si/data --resume
+  # Resume training from checkpoint
+  glass train ./my_experiment --resume
 
-  # Full control example
-  glass train_score Si_1.5_2.5_3.5 \\
-      --num-species 2 \\
-      --data-root /path/to/demo_Si/data \\
-      --max-epochs 12000 \\
-      --cutoff 5 \\
-      --k 0.8 \\
-      --dup 4 \\
-      --n-conv 5 \\
-      --dim 200 \\
-      --ema-decay 0.9999 \\
-      --lr 0.001 \\
-      --resume
+  # Train spectral surrogate (EXAFS)
+  glass train ./my_experiment --model-type spec --spec-type exafs --num-species 1
+
+  # Override specific parameters
+  glass train ./my_experiment --max-epochs 5000 --lr 0.0005
 
 KEY PARAMETERS:
 
-  --k              Noise level (higher = harder denoising task)
-  --cutoff         Graph cutoff radius (Å)
-  --n-conv, --dim  Model capacity
-  --dup            Useful for small datasets (data repetition)
-  --ema-decay      Stabilizes sampling (keep ~0.999–0.9999)
-
+  --model-type     "score" (structure generation) or "spec" (spectral surrogate)
+  --num-species    Number of atomic species in the system
+  --cutoff         Graph cutoff radius (Å), default: 5.0
+  --k              Noise level for diffusion, default: 0.8
+  --dim            Hidden dimension, default: 200
+  --n-conv         Number of convolution layers, default: 5
+  --ema-decay      EMA decay for model stability, default: 0.9999
 """,
 )
-@click.argument("sample_tag", type=str)
+@click.argument("experiment_path", type=click.Path())
 @click.option(
-    "--num-species", type=int, required=True, help="Number of atomic species."
+    "--model-type",
+    type=click.Choice(["score", "spec"]),
+    default=None,
+    help="Model type: 'score' for structure generation, 'spec' for spectral surrogate.",
 )
 @click.option(
-    "--new-model/--resume",
-    default=True,
-    help="Start a new model or resume from the latest checkpoint.",
+    "--num-species",
+    type=int,
+    default=None,
+    help="Number of atomic species.",
+)
+@click.option(
+    "--spec-type",
+    type=click.Choice(["exafs", "xanes"]),
+    default=None,
+    help="[spec model only] Spectral type.",
+)
+@click.option(
+    "--resume/--new",
+    "resume",
+    default=False,
+    help="Resume from last checkpoint or start new training.",
 )
 @click.option(
     "--cutoff",
     type=float,
-    default=5.0,
-    show_default=True,
-    help="Cutoff radius for atomic graph construction.",
+    default=None,
+    help="Graph cutoff radius (Å).",
 )
 @click.option(
     "--k",
     type=float,
-    default=0.8,
-    show_default=True,
-    help="Maximum noise level applied in training.",
+    default=None,
+    help="Maximum noise level.",
 )
 @click.option(
     "--dup",
     type=int,
-    default=4,
-    show_default=True,
-    help="Dataset duplication factor for longer epochs.",
+    default=None,
+    help="Dataset duplication factor.",
 )
 @click.option(
     "--train-size",
     type=float,
-    default=0.9,
-    show_default=True,
+    default=None,
     help="Train/validation split fraction.",
 )
 @click.option(
     "--scale-y",
     type=float,
-    default=1.0,
-    show_default=True,
+    default=None,
     help="Scale factor for spectroscopy curve.",
 )
 @click.option(
-    "--batch-size", type=int, default=1, show_default=True, help="Batch size."
+    "--batch-size",
+    type=int,
+    default=None,
+    help="Batch size.",
 )
 @click.option(
     "--num-workers",
     type=int,
-    default=8,
-    show_default=True,
+    default=None,
     help="Number of dataloader workers.",
 )
 @click.option(
     "--n-conv",
     type=int,
-    default=5,
-    show_default=True,
+    default=None,
     help="Number of convolution layers.",
 )
 @click.option(
-    "--dim", type=int, default=200, show_default=True, help="Hidden dimension."
+    "--dim",
+    type=int,
+    default=None,
+    help="Hidden dimension.",
 )
 @click.option(
-    "--ema-decay", type=float, default=0.9999, show_default=True, help="EMA decay."
+    "--ema-decay",
+    type=float,
+    default=None,
+    help="EMA decay.",
 )
 @click.option(
     "--lr",
     "--learn-rate",
     type=float,
-    default=1e-3,
-    show_default=True,
+    default=None,
     help="Learning rate.",
 )
 @click.option(
     "--max-epochs",
     type=int,
-    default=12000,
-    show_default=True,
+    default=None,
     help="Maximum number of training epochs.",
+)
+@click.option(
+    "--out-dim",
+    type=int,
+    default=None,
+    help="[spec model only] Output dimension (default: 400 for exafs, 100 for xanes).",
 )
 @click.option(
     "--accelerator",
     type=str,
-    default="gpu",
-    show_default=True,
+    default=None,
     help="Lightning accelerator.",
 )
 @click.option(
     "--strategy",
     type=str,
-    default="ddp_find_unused_parameters_true",
-    show_default=True,
+    default=None,
     help="Lightning distributed training strategy.",
 )
 @click.option(
     "--refresh-rate",
     type=int,
-    default=10,
-    show_default=True,
+    default=None,
     help="Progress bar refresh rate.",
-)
-@click.option(
-    "--save-dir",
-    type=str,
-    default="./models/",
-    show_default=True,
-    help="Directory for logs/checkpoints.",
-)
-@click.option(
-    "--data-root",
-    type=str,
-    default="./data",
-    show_default=True,
-    help="Root directory containing sample data folders.",
 )
 @click.option(
     "--matmul-precision",
     type=click.Choice(["highest", "high", "medium"]),
-    default="medium",
-    show_default=True,
+    default=None,
     help="Torch float32 matmul precision.",
 )
-def train_score(
-    sample_tag,
+@click.option(
+    "--save-top-k",
+    type=int,
+    default=None,
+    help="Number of best checkpoints to keep.",
+)
+def train(
+    experiment_path,
+    model_type,
     num_species,
-    new_model,
+    spec_type,
+    resume,
     cutoff,
     k,
     dup,
@@ -196,315 +220,215 @@ def train_score(
     ema_decay,
     lr,
     max_epochs,
-    accelerator,
-    strategy,
-    refresh_rate,
-    save_dir,
-    data_root,
-    matmul_precision,
-):
-    """Train a score model for a given sample tag."""
-
-    torch.set_float32_matmul_precision(matmul_precision)
-
-    click.echo(f"Sample tag: {sample_tag}")
-    click.echo(f"Number of species: {num_species}")
-
-    datamodule = StructureSpecDataModule(
-        data_dir=f"{data_root}/{sample_tag}/",
-        cutoff=cutoff,
-        train_prior=True,
-        k=k,
-        train_size=train_size,
-        scale_y=scale_y,
-        dup=dup,
-        batch_size=batch_size,
-        num_workers=num_workers,
-    )
-
-    if new_model:
-        score_net = LitScoreNet(
-            num_species=num_species,
-            num_convs=n_conv,
-            dim=dim,
-            ema_decay=ema_decay,
-            learn_rate=lr,
-        )
-        checkpoint = None
-        click.echo("Starting a new model instance")
-    else:
-        checkpoints = sorted(
-            glob.glob(f"{save_dir}/{sample_tag}/version_*/checkpoints/*.ckpt")
-        )
-        if not checkpoints:
-            raise click.ClickException(
-                f"No checkpoints found under {save_dir}/{sample_tag}/version_*/checkpoints/*.ckpt"
-            )
-        checkpoint = checkpoints[-1]
-        score_net = LitScoreNet.load_from_checkpoint(checkpoint)
-        click.echo(f"Loaded model weights from {checkpoint}")
-
-    trainer = L.Trainer(
-        accelerator=accelerator,
-        max_epochs=max_epochs,
-        logger=TensorBoardLogger(save_dir=save_dir, name=sample_tag),
-        callbacks=[TQDMProgressBar(refresh_rate=refresh_rate)],
-        strategy=strategy,
-    )
-
-    trainer.fit(score_net, datamodule, ckpt_path=checkpoint)
-
-
-@click.command(
-    "train_spec",
-    help="""
-Train (or resume) a per-atom spectral surrogate model (EXAFS or XANES).
-
-Data is expected at:
-  DATA_ROOT/SAMPLE_TAG/structures/train/*.xyz
-  DATA_ROOT/SAMPLE_TAG/{exafs,xanes}/train/*.txt  (one row per atom)
-
-Checkpoints are saved under:
-  SAVE_DIR/SAMPLE_TAG/
-
-EXAMPLES:
-
-  # Train EXAFS from scratch
-  glass train_spec Si_exafs --spec-type exafs --num-species 1 --out-dim 400
-
-  # Train XANES, resume from checkpoint
-  glass train_spec Si_xanes --spec-type xanes --num-species 1 --out-dim 100 --resume
-
-  # Multi-species EXAFS
-  glass train_spec ZrNiAl_exafs --spec-type exafs --num-species 3 --out-dim 400 \\
-      --data-root /path/to/demo_Si/data --max-epochs 8000
-""",
-)
-@click.argument("sample_tag", type=str)
-@click.option(
-    "--spec-type",
-    type=click.Choice(["exafs", "xanes"]),
-    required=True,
-    help="Spectral model type.",
-)
-@click.option(
-    "--num-species", type=int, required=True, help="Number of atomic species."
-)
-@click.option(
-    "--out-dim",
-    type=int,
-    default=None,
-    show_default=True,
-    help="Output dimension (default: 400 for exafs, 100 for xanes).",
-)
-@click.option(
-    "--new-model/--resume",
-    default=True,
-    help="Start a new model or resume from the latest checkpoint.",
-)
-@click.option(
-    "--cutoff",
-    type=float,
-    default=5.0,
-    show_default=True,
-    help="Graph cutoff radius (Å).",
-)
-@click.option(
-    "--k", type=float, default=0.8, show_default=True, help="Maximum noise level."
-)
-@click.option(
-    "--dup",
-    type=int,
-    default=128,
-    show_default=True,
-    help="Dataset duplication factor.",
-)
-@click.option(
-    "--train-size",
-    type=float,
-    default=0.9,
-    show_default=True,
-    help="Train/validation split fraction.",
-)
-@click.option(
-    "--batch-size", type=int, default=32, show_default=True, help="Batch size."
-)
-@click.option(
-    "--num-workers",
-    type=int,
-    default=8,
-    show_default=True,
-    help="Number of dataloader workers.",
-)
-@click.option(
-    "--n-conv",
-    type=int,
-    default=5,
-    show_default=True,
-    help="Number of convolution layers.",
-)
-@click.option(
-    "--dim", type=int, default=200, show_default=True, help="Hidden dimension."
-)
-@click.option(
-    "--ema-decay", type=float, default=0.9999, show_default=True, help="EMA decay."
-)
-@click.option(
-    "--lr",
-    "--learn-rate",
-    type=float,
-    default=1e-3,
-    show_default=True,
-    help="Learning rate.",
-)
-@click.option(
-    "--max-epochs",
-    type=int,
-    default=None,
-    show_default=True,
-    help="Max training epochs (default: 8000 for exafs, 3000 for xanes).",
-)
-@click.option(
-    "--accelerator",
-    type=str,
-    default="gpu",
-    show_default=True,
-    help="Lightning accelerator.",
-)
-@click.option(
-    "--strategy",
-    type=str,
-    default="ddp_find_unused_parameters_true",
-    show_default=True,
-    help="Lightning distributed strategy.",
-)
-@click.option(
-    "--refresh-rate",
-    type=int,
-    default=10,
-    show_default=True,
-    help="Progress bar refresh rate.",
-)
-@click.option(
-    "--save-dir",
-    type=str,
-    default="./models/",
-    show_default=True,
-    help="Directory for logs/checkpoints.",
-)
-@click.option(
-    "--data-root",
-    type=str,
-    default="./data",
-    show_default=True,
-    help="Root directory containing sample data folders.",
-)
-@click.option(
-    "--matmul-precision",
-    type=click.Choice(["highest", "high", "medium"]),
-    default="medium",
-    show_default=True,
-    help="Torch matmul precision.",
-)
-def train_spec(
-    sample_tag,
-    spec_type,
-    num_species,
     out_dim,
-    new_model,
-    cutoff,
-    k,
-    dup,
-    train_size,
-    batch_size,
-    num_workers,
-    n_conv,
-    dim,
-    ema_decay,
-    lr,
-    max_epochs,
     accelerator,
     strategy,
     refresh_rate,
-    save_dir,
-    data_root,
     matmul_precision,
+    save_top_k,
 ):
-    """Train a per-atom EXAFS or XANES surrogate model."""
-    from glass.lit.modules import LitSpecNet
-
-    torch.set_float32_matmul_precision(matmul_precision)
-
-    if out_dim is None:
-        out_dim = 400 if spec_type == "exafs" else 100
-    if max_epochs is None:
-        max_epochs = 8000 if spec_type == "exafs" else 3000
-
-    click.echo(f"Sample tag:  {sample_tag}")
-    click.echo(
-        f"Spec type:   {spec_type}  |  out_dim={out_dim}  |  max_epochs={max_epochs}"
-    )
-    click.echo(f"Num species: {num_species}")
-
-    data_dir = os.path.join(data_root, sample_tag)
-    xyz_found = (
-        glob.glob(os.path.join(data_dir, "structures", "train", "*.xyz"))
-        or glob.glob(os.path.join(data_dir, "structures", "*.xyz"))
-        or glob.glob(os.path.join(data_dir, "*.xyz"))
-    )
-    if not xyz_found:
-        raise click.ClickException(
-            f"No .xyz files found under {data_dir}\n"
-            f"Expected layout: {data_dir}/structures/train/*.xyz\n"
-            f"                 {data_dir}/{spec_type}/train/*.txt  (one row per atom)"
-        )
-    click.echo(f"Data dir:    {data_dir}  ({len(xyz_found)} structures found)")
-    data_dir = data_dir + "/"  # StructureSpecDataModule expects trailing slash
-
-    datamodule = StructureSpecDataModule(
-        data_dir=data_dir,
-        cutoff=cutoff,
-        train_prior=True,
-        k=k,
-        train_size=train_size,
-        scale_y=1.0,
-        dup=dup,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        guide_type=spec_type,
-    )
-
-    if new_model:
-        spec_net = LitSpecNet(
-            num_species=num_species,
-            num_convs=n_conv,
-            dim=dim,
-            out_dim=out_dim,
-            ema_decay=ema_decay,
-            learn_rate=lr,
-        )
-        checkpoint = None
-        click.echo("Starting a new model instance")
+    """Train a model with unified experiment structure."""
+    
+    # Initialize experiment
+    experiment = Experiment(experiment_path)
+    
+    # Load or create config
+    if experiment.config_path.exists() and not resume:
+        click.echo(f"Loading existing config from {experiment.config_path}")
+        config = experiment.load_config()
     else:
-        checkpoints = sorted(
-            glob.glob(
-                f"{save_dir}/{sample_tag}_{spec_type}/version_*/checkpoints/*.ckpt"
-            )
-        )
-        if not checkpoints:
+        # Validate required parameters for new experiment
+        if model_type is None:
             raise click.ClickException(
-                f"No checkpoints found under {save_dir}/{sample_tag}_{spec_type}/version_*/checkpoints/*.ckpt"
+                "--model-type is required for new experiments (score or spec)"
             )
-        checkpoint = checkpoints[-1]
-        spec_net = LitSpecNet.load_from_checkpoint(checkpoint)
-        click.echo(f"Loaded model weights from {checkpoint}")
-
-    trainer = L.Trainer(
-        accelerator=accelerator,
-        max_epochs=max_epochs,
-        logger=TensorBoardLogger(save_dir=save_dir, name=f"{sample_tag}_{spec_type}"),
-        callbacks=[TQDMProgressBar(refresh_rate=refresh_rate)],
-        strategy=strategy,
+        if num_species is None:
+            raise click.ClickException(
+                "--num-species is required for new experiments"
+            )
+        if model_type == "spec" and spec_type is None:
+            raise click.ClickException(
+                "--spec-type is required for spec models (exafs or xanes)"
+            )
+        
+        # Create new experiment structure
+        experiment._create_structure()
+        config = ExperimentConfig()
+        config.model_type = model_type
+        config.num_species = num_species
+        if spec_type:
+            config.spec_type = spec_type
+            config.out_dim = 400 if spec_type == "exafs" else 100
+    
+    # Apply CLI overrides
+    cli_overrides = {}
+    if cutoff is not None:
+        cli_overrides["cutoff"] = cutoff
+    if k is not None:
+        cli_overrides["k"] = k
+    if dup is not None:
+        cli_overrides["dup"] = dup
+    if train_size is not None:
+        cli_overrides["train_size"] = train_size
+    if scale_y is not None:
+        cli_overrides["scale_y"] = scale_y
+    if batch_size is not None:
+        cli_overrides["batch_size"] = batch_size
+    if num_workers is not None:
+        cli_overrides["num_workers"] = num_workers
+    if n_conv is not None:
+        cli_overrides["num_convs"] = n_conv
+    if dim is not None:
+        cli_overrides["dim"] = dim
+    if ema_decay is not None:
+        cli_overrides["ema_decay"] = ema_decay
+    if lr is not None:
+        cli_overrides["learning_rate"] = lr
+    if max_epochs is not None:
+        cli_overrides["max_epochs"] = max_epochs
+    if out_dim is not None:
+        cli_overrides["out_dim"] = out_dim
+    if accelerator is not None:
+        cli_overrides["accelerator"] = accelerator
+    if strategy is not None:
+        cli_overrides["strategy"] = strategy
+    if refresh_rate is not None:
+        cli_overrides["refresh_rate"] = refresh_rate
+    if matmul_precision is not None:
+        cli_overrides["matmul_precision"] = matmul_precision
+    if save_top_k is not None:
+        cli_overrides["save_top_k"] = save_top_k
+    
+    config.update(**cli_overrides)
+    
+    # Set default max_epochs for spec models
+    if config.model_type == "spec" and max_epochs is None:
+        if config.spec_type == "exafs":
+            config.max_epochs = 8000
+        elif config.spec_type == "xanes":
+            config.max_epochs = 3000
+    
+    # Save updated config
+    experiment.save_config(config)
+    
+    # Set torch precision
+    if config.matmul_precision:
+        torch.set_float32_matmul_precision(config.matmul_precision)
+    
+    click.echo(f"Experiment: {experiment.root}")
+    click.echo(f"Model type: {config.model_type}")
+    click.echo(f"Number of species: {config.num_species}")
+    if config.model_type == "spec":
+        click.echo(f"Spec type: {config.spec_type}")
+        click.echo(f"Output dim: {config.out_dim}")
+    
+    # Get data files
+    data_files = experiment.get_data_files()
+    if not data_files:
+        raise click.ClickException(
+            f"No .xyz files found in {experiment.data_dir}\n"
+            "Place training structures (*.xyz) in the data/ folder."
+        )
+    click.echo(f"Found {len(data_files)} training structures")
+    
+    # Setup datamodule
+    guide_type = config.spec_type if config.model_type == "spec" else None
+    datamodule = StructureSpecDataModule(
+        data_dir=experiment.get_data_dir_for_datamodule(),
+        cutoff=config.cutoff,
+        train_prior=True,
+        k=config.k,
+        train_size=config.train_size,
+        scale_y=config.scale_y,
+        dup=config.dup,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        guide_type=guide_type,
     )
-
-    trainer.fit(spec_net, datamodule, ckpt_path=checkpoint)
+    
+    # Setup model
+    checkpoint_path = None
+    if resume:
+        try:
+            checkpoint_path = experiment.find_checkpoint("last")
+            click.echo(f"Resuming from checkpoint: {checkpoint_path}")
+        except FileNotFoundError:
+            click.echo("No checkpoint found, starting fresh training")
+    
+    if config.model_type == "score":
+        model = LitScoreNet(
+            num_species=config.num_species,
+            num_convs=config.num_convs,
+            dim=config.dim,
+            ema_decay=config.ema_decay,
+            learn_rate=config.learning_rate,
+        )
+        name = "score"
+    else:  # spec
+        model = LitSpecNet(
+            num_species=config.num_species,
+            num_convs=config.num_convs,
+            dim=config.dim,
+            out_dim=config.out_dim,
+            ema_decay=config.ema_decay,
+            learn_rate=config.learning_rate,
+        )
+        name = f"{config.spec_type}"
+    
+    if checkpoint_path:
+        model = model.__class__.load_from_checkpoint(checkpoint_path)
+    
+    # Setup checkpoint callbacks with unique state keys
+    # Main checkpoint callback - saves top k checkpoints by epoch number
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=experiment.checkpoints_dir,
+        filename="{epoch:04d}",
+        save_top_k=config.save_top_k,
+        monitor="train_loss",
+        mode="min",
+        save_last=True,
+    )
+    
+    # Best checkpoint with fixed name - uses custom class for unique state_key
+    best_checkpoint_callback = BestCheckpoint(
+        dirpath=experiment.checkpoints_dir,
+        filename="best",
+        monitor="train_loss",
+        mode="min",
+        save_top_k=1,
+    )
+    
+    # Last checkpoint with fixed name - uses custom class for unique state_key
+    last_checkpoint_callback = LastCheckpoint(
+        dirpath=experiment.checkpoints_dir,
+        filename="last",
+        save_top_k=1,
+        monitor="step",
+        mode="max",
+        every_n_epochs=1,
+    )
+    
+    # Setup trainer
+    trainer = L.Trainer(
+        accelerator=config.accelerator,
+        max_epochs=config.max_epochs,
+        logger=TensorBoardLogger(
+            save_dir=experiment.logs_dir,
+            name="",
+            version="0",
+        ),
+        callbacks=[
+            TQDMProgressBar(refresh_rate=config.refresh_rate),
+            checkpoint_callback,
+            best_checkpoint_callback,
+            last_checkpoint_callback,
+        ],
+        strategy=config.strategy,
+    )
+    
+    # Train
+    trainer.fit(model, datamodule, ckpt_path=checkpoint_path)
+    
+    click.echo(f"\nTraining complete!")
+    click.echo(f"Checkpoints saved to: {experiment.checkpoints_dir}")
+    click.echo(f"Logs saved to: {experiment.logs_dir}")

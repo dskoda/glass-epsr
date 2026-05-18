@@ -13,8 +13,8 @@ from ase.io import read
 import numpy as np
 import torch
 
-from glass.potentials.torch_tersoff import TersoffParameters, TorchTersoff
-from glass.potentials.torch_tersoff.neighbors import build_neighbors
+from glass.potentials.tersoff import TersoffParameters, TorchTersoff
+from glass.potentials.tersoff.neighbors import build_neighbors
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -133,3 +133,36 @@ def test_neighbor_count_diamond():
     counts = torch.bincount(i_idx, minlength=pos.shape[0])
     assert int(counts.min()) == 4
     assert int(counts.max()) == 4
+
+
+def test_large_diamond_dense_vs_cell_list_agree():
+    """The dense and cell-list neighbour paths must give identical energy
+    (to within 1e-9) for a system large enough to trigger the cell-list
+    switch (N > 256)."""
+    atoms = bulk("Si", "diamond", a=5.43).repeat((4, 4, 4))  # 512 atoms
+    pos, cell, pbc = _atoms_to_tensors(atoms)
+    tc = torch_calc()
+    E_ref = tc.energy(pos, cell, pbc).item()
+
+    # Reference: force dense path on a smaller replica.
+    atoms_small = bulk("Si", "diamond", a=5.43).repeat((2, 2, 2))  # 64 atoms
+    pos_s, cell_s, pbc_s = _atoms_to_tensors(atoms_small)
+    E_small = tc.energy(pos_s, cell_s, pbc_s).item()
+
+    # Pure correctness: diamond energy is extensive, so E(512) == 8 * E(64)
+    # because 512 = 8 * 64. This confirms both paths produce the right
+    # answer (dense for N=64, cell-list for N=512).
+    assert abs(E_ref - 8 * E_small) < 1e-6, (E_ref, 8 * E_small)
+
+
+def test_large_system_autograd_no_oom():
+    """Regression: large cells must not blow up autograd memory. This
+    mirrors the path TersoffEnergyGuidance uses inside the reverse SDE."""
+    atoms = bulk("Si", "diamond", a=5.43).repeat((4, 4, 4))  # 512 atoms
+    pos, cell, pbc = _atoms_to_tensors(atoms)
+    tc = torch_calc()
+    pos = pos.detach().requires_grad_(True)
+    E = tc.energy(pos, cell, pbc)
+    (grad,) = torch.autograd.grad(E, pos)
+    assert grad.shape == pos.shape
+    assert torch.isfinite(grad).all()

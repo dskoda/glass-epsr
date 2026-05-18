@@ -6,6 +6,11 @@ so glass does not depend on the external graphite package.
 
 from torch import Tensor
 
+# Re-export for backwards compatibility
+from .sampling import denoise_by_sde
+
+__all__ = ["VarianceExplodingDiffuser", "denoise_by_sde"]
+
 
 class VarianceExplodingDiffuser:
     """Variance-exploding SDE: sigma(t) = k*t."""

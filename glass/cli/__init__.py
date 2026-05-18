@@ -14,12 +14,12 @@ import click
 
 @click.group()
 def glass():
-    """CLI for training and running the glass uncond_denoiser workflows."""
+    """CLI for training and generating atomic structures with glass."""
     pass
 
 
-from glass.cli.train import train_score, train_spec
-from glass.cli.denoise import uncond_denoise, cond_denoise
+from glass.cli.train import train
+from glass.cli.generate import generate
 from glass.cli.initialize import initialize
 from glass.cli.analysis import (
     plot_loss,
@@ -27,20 +27,23 @@ from glass.cli.analysis import (
     calc_metrics,
     build_ref_stats,
 )
+from glass.cli.metrics import metrics, compute_pdf_command, compute_coordination_command, compare_command
 
-glass.add_command(train_score)
-glass.add_command(train_spec)
+glass.add_command(train)
+glass.add_command(generate)
 glass.add_command(plot_loss)
-glass.add_command(uncond_denoise)
-glass.add_command(cond_denoise)
 glass.add_command(initialize)
 glass.add_command(write_spec_feature)
 glass.add_command(calc_metrics)
 glass.add_command(build_ref_stats)
+glass.add_command(metrics)
+glass.add_command(compute_pdf_command, name="pdf")
+glass.add_command(compute_coordination_command, name="coordination")
+glass.add_command(compare_command, name="compare")
 
 # Register Tersoff potential subcommands (md, energy) under the `glass` group.
-from glass.potentials.torch_tersoff.cli import md as _tersoff_md
-from glass.potentials.torch_tersoff.cli import energy as _tersoff_energy
+from glass.potentials.tersoff.cli import md as _tersoff_md
+from glass.potentials.tersoff.cli import energy as _tersoff_energy
 
 glass.add_command(_tersoff_md, name="md")
 glass.add_command(_tersoff_energy, name="energy")

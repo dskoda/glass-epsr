@@ -208,7 +208,7 @@ class StructureSpecDataModule(pl.LightningDataModule):
             pin_memory=True,
         )
 
-    def teardown(self):
+    def teardown(self, stage=None):
         # Clean up state after the trainer stops, delete files...
         # Called on every process in DDP
         pass
