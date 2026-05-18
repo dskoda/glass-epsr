@@ -116,7 +116,7 @@ from glass.utils.atoms_utils import (
 # --------------------------------------------------------------------------
 
 W_PDF = 1.0
-W_COORD = 1.0
+W_COORD = 2.0  # bumped 1.0 → 2.0 in v2_ood: makes coord_emd parity with PDF
 W_ADF = 0.25
 
 W_UNCOND = 0.5
@@ -402,61 +402,123 @@ def _evaluate_one(
 
 def _build_objective(
     experiment_path: str,
-    init_paths: List[Path],
-    ref_dir: Path,
+    buckets: List[Tuple[str, List[Path], Path]],
     n_inits: int,
     n_seeds: int,
 ):
+    """Build the Optuna objective.
+
+    Args:
+        buckets: list of (density_label, init_paths, ref_dir) tuples. A
+            single-density study is a single-bucket list.
+    """
     # Deterministic order so the same (sub_id, seed) pairs are evaluated
     # across replay runs.
-    init_paths = sorted(init_paths)[: max(n_inits, 1)]
+    buckets = [
+        (label, sorted(paths)[: max(n_inits, 1)], ref_dir)
+        for label, paths, ref_dir in buckets
+    ]
+    all_paths_flat = [p for _, paths, _ in buckets for p in paths]
 
     def objective(trial):
-        ctx = _get_device_ctx(experiment_path, init_paths, ref_dir)
+        # Touch every bucket's ref_dir so the per-device cache fills lazily.
+        # We pass *all* init paths in one call to avoid re-acquiring the
+        # device thread-local. Each bucket's ref_dir is consumed lazily
+        # below in the per-bucket loop via _ensure_pairs.
+        ctx = _get_device_ctx(experiment_path, [], buckets[0][2])
+        for label, paths, ref_dir in buckets:
+            _ensure_pairs(ctx, paths, ref_dir)
+
         params = _sample_params(trial)
 
-        mode_obj_samples: Dict[str, List[float]] = {"uncond": [], "cond": []}
+        # Per-(label, mode) accumulators.
+        mode_obj_samples: Dict[Tuple[str, str], List[float]] = {
+            (label, mode): []
+            for label, _, _ in buckets
+            for mode in ("uncond", "cond")
+        }
         per_run_errors: List[Dict[str, object]] = []
 
         step = 0
         for seed_idx in range(n_seeds):
-            for init_path in init_paths:
-                sub_id = init_path.stem
-                for mode in ("uncond", "cond"):
-                    seed = abs(
-                        1000 * int(trial.number) + 100 * seed_idx
-                        + (0 if mode == "uncond" else 1)
-                    ) + hash(sub_id) % 997
-                    t0 = time.time()
-                    try:
-                        errors = _evaluate_one(
-                            params, sub_id, mode, ctx, int(seed),
+            for label, paths, _ref_dir in buckets:
+                for init_path in paths:
+                    sub_id = init_path.stem
+                    for mode in ("uncond", "cond"):
+                        seed = abs(
+                            1000 * int(trial.number) + 100 * seed_idx
+                            + (0 if mode == "uncond" else 1)
+                        ) + hash(sub_id) % 997
+                        t0 = time.time()
+                        try:
+                            errors = _evaluate_one(
+                                params, sub_id, mode, ctx, int(seed),
+                            )
+                        except Exception as e:
+                            trial.set_user_attr("error", f"{type(e).__name__}: {e}")
+                            return float("inf")
+                        mode_obj_samples[(label, mode)].append(_mode_obj(errors))
+                        per_run_errors.append(
+                            {"label": label, "sub_id": sub_id, "mode": mode,
+                             "seed": int(seed),
+                             "time_s": time.time() - t0, **errors}
                         )
-                    except Exception as e:
-                        trial.set_user_attr("error", f"{type(e).__name__}: {e}")
-                        return float("inf")
-                    mode_obj_samples[mode].append(_mode_obj(errors))
-                    per_run_errors.append(
-                        {"sub_id": sub_id, "mode": mode, "seed": int(seed),
-                         "time_s": time.time() - t0, **errors}
+            # Pruner-friendly running estimate (mean across all buckets/modes).
+            running_per_bucket = []
+            for label, _, _ in buckets:
+                u = mode_obj_samples[(label, "uncond")]
+                c = mode_obj_samples[(label, "cond")]
+                if u and c:
+                    running_per_bucket.append(
+                        W_UNCOND * float(np.mean(u)) + W_COND * float(np.mean(c))
                     )
-            # Report a running estimate per seed so the pruner has
-            # something to chew on.
-            running = (
-                W_UNCOND * float(np.mean(mode_obj_samples["uncond"]))
-                + W_COND * float(np.mean(mode_obj_samples["cond"]))
-            )
-            trial.report(running, step=step)
+            if running_per_bucket:
+                trial.report(float(np.mean(running_per_bucket)), step=step)
             step += 1
             if trial.should_prune():
                 import optuna
                 raise optuna.TrialPruned()
 
-        obj_uncond = float(np.mean(mode_obj_samples["uncond"]))
-        obj_cond = float(np.mean(mode_obj_samples["cond"]))
-        total = W_UNCOND * obj_uncond + W_COND * obj_cond
+        # Per-bucket per-mode objectives.
+        per_bucket_mode_obj: Dict[str, Dict[str, float]] = {}
+        per_bucket_total: Dict[str, float] = {}
+        for label, _, _ in buckets:
+            ou = float(np.mean(mode_obj_samples[(label, "uncond")]))
+            oc = float(np.mean(mode_obj_samples[(label, "cond")]))
+            per_bucket_mode_obj[label] = {"uncond": ou, "cond": oc}
+            per_bucket_total[label] = W_UNCOND * ou + W_COND * oc
 
-        # Pre-digest summary: per-metric means, per-mode objective, device.
+        # Final objective: equal-weight average across buckets.
+        # (Single-bucket studies behave exactly as before.)
+        obj_uncond = float(np.mean([per_bucket_mode_obj[l]["uncond"]
+                                    for l in per_bucket_mode_obj]))
+        obj_cond = float(np.mean([per_bucket_mode_obj[l]["cond"]
+                                  for l in per_bucket_mode_obj]))
+        total = float(np.mean(list(per_bucket_total.values())))
+
+        # Per-bucket and aggregate user-attrs.
+        for label in per_bucket_mode_obj:
+            for mode in ("uncond", "cond"):
+                err = {
+                    k: float(np.mean(
+                        [e[k] for e in per_run_errors
+                         if e["mode"] == mode and e["label"] == label
+                         and isinstance(e.get(k), (int, float))]
+                    ))
+                    for k in ("pdf_rmse", "coordination_emd", "adf_rmse")
+                }
+                trial.set_user_attr(
+                    f"mean_errors_{mode}_{label}", json.dumps(err)
+                )
+            trial.set_user_attr(
+                f"obj_uncond_{label}", per_bucket_mode_obj[label]["uncond"]
+            )
+            trial.set_user_attr(
+                f"obj_cond_{label}", per_bucket_mode_obj[label]["cond"]
+            )
+
+        # Aggregate (cross-bucket) attrs — keep names so existing tooling
+        # that reads obj_uncond/obj_cond/mean_errors_* still works.
         mean_err_uncond = {
             k: float(np.mean([e[k] for e in per_run_errors
                               if e["mode"] == "uncond" and isinstance(e.get(k), (int, float))]))
@@ -472,10 +534,42 @@ def _build_objective(
         trial.set_user_attr("obj_cond", obj_cond)
         trial.set_user_attr("mean_errors_uncond", json.dumps(mean_err_uncond))
         trial.set_user_attr("mean_errors_cond", json.dumps(mean_err_cond))
+        trial.set_user_attr(
+            "bucket_labels", json.dumps([l for l, _, _ in buckets])
+        )
 
         return total
 
     return objective
+
+
+def _ensure_pairs(ctx: "DeviceCtx", init_paths: List[Path], ref_dir: Path) -> None:
+    """Lazy-fill ctx.{init_atoms,ref_atoms,target,ref_metrics}_by_id for
+    the given init_paths and ref_dir. Used by multi-bucket objectives."""
+    for init_path in init_paths:
+        sub_id = init_path.stem
+        if sub_id in ctx.init_atoms_by_id:
+            continue
+        init_atoms = read(str(init_path))
+        ref_path = ref_dir / f"{sub_id}.xyz"
+        if not ref_path.exists():
+            raise FileNotFoundError(
+                f"Reference for init {sub_id} not found at {ref_path}"
+            )
+        ref_atoms = read(str(ref_path))
+        target = compute_target_from_reference(
+            ref_atoms, ctx.guidance_model, "pdf", ctx.cutoff, ctx.device,
+        )
+        ref_metrics = compute_all_metrics(
+            ref_atoms,
+            include_dihedrals=False,
+            include_sq=False,
+            include_voronoi=False,
+        )
+        ctx.init_atoms_by_id[sub_id] = init_atoms
+        ctx.ref_atoms_by_id[sub_id] = ref_atoms
+        ctx.target_by_id[sub_id] = target
+        ctx.ref_metrics_by_id[sub_id] = ref_metrics
 
 
 # --------------------------------------------------------------------------
@@ -491,12 +585,25 @@ def main():
                                      formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("experiment_path", type=str,
                         help="Experiment dir containing checkpoints/, config.yaml.")
-    parser.add_argument("--ref-dir", type=str, required=True,
-                        help="Directory of reference *.xyz files (one per init sub_id).")
+    parser.add_argument("--ref-dir", type=str, default=None,
+                        help="Directory of reference *.xyz files (one per init sub_id). "
+                             "Single-density studies. Use --ref-dirs for multi-density.")
+    parser.add_argument("--ref-dirs", type=str, default=None,
+                        help="Comma-separated list of reference dirs, one per "
+                             "entry in --init-globs. Multi-density studies.")
     parser.add_argument("--init-dir", type=str, required=True,
                         help="Directory of init *.xyz files (will be matched to refs by filename stem).")
-    parser.add_argument("--init-glob", type=str, default="*.xyz",
-                        help="Glob pattern (relative to --init-dir) filtering inits.")
+    parser.add_argument("--init-glob", type=str, default=None,
+                        help="Glob pattern (relative to --init-dir) filtering inits. "
+                             "Single-density studies. Use --init-globs for multi-density.")
+    parser.add_argument("--init-globs", type=str, default=None,
+                        help="Comma-separated globs, one per density bucket. Each "
+                             "bucket gets its own ref dir from --ref-dirs (in order). "
+                             "Bucket label is the stripped pattern. Multi-density studies.")
+    parser.add_argument("--bucket-labels", type=str, default=None,
+                        help="Optional comma-separated user-friendly labels for the "
+                             "buckets (parallel to --init-globs). Default: derived "
+                             "from glob patterns.")
     parser.add_argument("--n-trials", type=int, default=100)
     parser.add_argument("--timeout", type=int, default=None,
                         help="Seconds.")
@@ -525,22 +632,68 @@ def main():
     print(f"Devices: {_device_pool}")
 
     init_dir = Path(args.init_dir).resolve()
-    ref_dir = Path(args.ref_dir).resolve()
-    init_paths = sorted(init_dir.glob(args.init_glob))
-    if not init_paths:
-        raise SystemExit(
-            f"No init files matched {args.init_glob!r} under {init_dir}"
+
+    # Build the bucket list. Two paths:
+    #   - multi-density: --init-globs + --ref-dirs (parallel comma lists)
+    #   - single-density: --init-glob + --ref-dir (legacy)
+    if args.init_globs and args.ref_dirs:
+        globs = [g.strip() for g in args.init_globs.split(",") if g.strip()]
+        ref_dirs = [Path(d.strip()).resolve() for d in args.ref_dirs.split(",") if d.strip()]
+        if len(globs) != len(ref_dirs):
+            raise SystemExit(
+                f"--init-globs has {len(globs)} entries but --ref-dirs has "
+                f"{len(ref_dirs)}. They must match."
+            )
+        if args.bucket_labels:
+            labels = [l.strip() for l in args.bucket_labels.split(",")]
+            if len(labels) != len(globs):
+                raise SystemExit("--bucket-labels must match --init-globs count.")
+        else:
+            # Derive a label from each glob pattern (e.g. "init_Si_1.5_*.xyz" -> "1.5")
+            import re
+            labels = []
+            for g in globs:
+                m = re.search(r"(\d+\.\d+)", g)
+                labels.append(m.group(1) if m else g)
+        buckets: List[Tuple[str, List[Path], Path]] = []
+        for label, g, rd in zip(labels, globs, ref_dirs):
+            paths = sorted(init_dir.glob(g))
+            if not paths:
+                raise SystemExit(f"No init files matched {g!r} under {init_dir}")
+            missing = [p.stem for p in paths if not (rd / f"{p.stem}.xyz").exists()]
+            if missing:
+                raise SystemExit(
+                    f"Bucket {label}: {len(missing)} inits missing refs "
+                    f"in {rd}: {missing[:3]}..."
+                )
+            buckets.append((label, paths, rd))
+        print(
+            f"Multi-density study: {len(buckets)} buckets — "
+            + ", ".join(f"{l}({len(p)})" for l, p, _ in buckets)
         )
-    # Validate that every init has a matching ref.
-    missing = [p.stem for p in init_paths
-               if not (ref_dir / f"{p.stem}.xyz").exists()]
-    if missing:
+    elif args.init_glob and args.ref_dir:
+        ref_dir = Path(args.ref_dir).resolve()
+        init_paths = sorted(init_dir.glob(args.init_glob))
+        if not init_paths:
+            raise SystemExit(
+                f"No init files matched {args.init_glob!r} under {init_dir}"
+            )
+        missing = [p.stem for p in init_paths
+                   if not (ref_dir / f"{p.stem}.xyz").exists()]
+        if missing:
+            raise SystemExit(
+                f"{len(missing)} inits have no matching ref in {ref_dir}: "
+                f"{missing[:3]}..."
+            )
+        print(f"Single-density study: {len(init_paths)} init/ref pairs in {init_dir}")
+        buckets = [("all", init_paths, ref_dir)]
+    else:
         raise SystemExit(
-            f"{len(missing)} inits have no matching ref in {ref_dir}: "
-            f"{missing[:3]}..."
+            "Provide either --init-glob+--ref-dir (single-density) "
+            "or --init-globs+--ref-dirs (multi-density)."
         )
-    print(f"Found {len(init_paths)} init/ref pairs in {init_dir}")
-    print(f"Using first {min(args.n_inits, len(init_paths))} per trial.")
+
+    print(f"Using first {args.n_inits} per bucket per trial.")
 
     storage_path = Path(args.storage)
     storage_path.parent.mkdir(parents=True, exist_ok=True)
@@ -556,7 +709,7 @@ def main():
     )
 
     objective = _build_objective(
-        args.experiment_path, init_paths, ref_dir,
+        args.experiment_path, buckets,
         n_inits=args.n_inits, n_seeds=args.n_seeds,
     )
 

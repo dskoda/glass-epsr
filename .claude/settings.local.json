@@ -53,7 +53,10 @@
       "Bash(mkdir -p /tmp/cond_val_A /tmp/cond_val_B /tmp/cond_val_C)",
       "Bash(CUDA_VISIBLE_DEVICES=1 KMP_DUPLICATE_LIB_OK=TRUE glass generate research/test/ --inits /tmp/cond_val_inits/ --ref-path research/test/data/ --guidance-type pdf --n-runs 3 --outdir /tmp/cond_val_B)",
       "Bash(sed -n '78,95p' /home/dskoda/prj/glass-epsr/scripts/run_glass.sh)",
-      "Bash(sed -n '145,165p' /home/dskoda/prj/glass-epsr/scripts/run_glass.sh)"
+      "Bash(sed -n '145,165p' /home/dskoda/prj/glass-epsr/scripts/run_glass.sh)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_experiment.py tests/test_hpo_objective.py -q)",
+      "Bash(ls scripts/)",
+      "Bash(ls results/figures/)"
     ]
   }
 }

@@ -51,26 +51,31 @@ class ExperimentConfig:
     save_top_k: int = 3
     
     # Generation parameters (for inference).
-    # Defaults come from the unified HPO study ``glass_unified_v1``
-    # (scripts/hpo_unified.py): top-5 consensus across trials that jointly
-    # optimise unconditional + PDF-conditional runs. Winning trial #125
-    # scored obj_uncond=0.039 / obj_cond=0.046, vs. the prior
-    # uncond-only HPO's 0.16 cond objective with rho=1000. The t-schedule
-    # exponent also flipped from 0.55 (concentrate at high noise) to 1.4
-    # (concentrate at low noise) and tstep dropped 4x.
+    # Defaults come from the multi-density HPO ``glass_unified_v2_ood``
+    # (2026-05-14, scripts/hpo_unified.py): top-5 consensus across 200
+    # trials that jointly optimise unconditional + PDF-conditional runs at
+    # ρ ∈ {1.5, 2.5, 3.5}, with W_COORD bumped to 2.0 to make coord parity
+    # with PDF. Best trial replay (5 inits × 5 seeds × 3 densities):
+    # cond pdf_rmse=0.042, coord_emd=0.171, adf_rmse=0.063 — competitive
+    # with the v1 in-distribution result (0.013/0.023/0.042) while *also*
+    # working at the OOD densities. v1 had cond pdf_rmse > 0.30 OOD.
     checkpoint: str = "best"  # "best", "last", or specific filename
     n_runs: int = 10
-    tmin: float = 1e-4
-    tmax: float = 0.54
-    tstep: int = 128
+    tmin: float = 7e-4
+    tmax: float = 0.876
+    tstep: int = 256
     save_traj: bool = False
     device: str = "cuda:0"
 
     # Guidance parameters (for conditional generation).
-    # rho lowered ~25x: at rho=1000 the PDF gradient swamped Tersoff and
-    # coord_emd collapsed. rho ~ 35 balances all three score terms.
+    # rho=240 from v2_ood top-5 consensus. v1's rho=35 was severely
+    # under-powered OOD; v2_ood's joint multi-density search converged on
+    # rho ~ 200-340 (median 238). At ρ=2.5 in-distribution this slightly
+    # improves PDF (0.018 vs 0.013) and degrades coord (0.018 vs 0.022)
+    # but it dramatically rescues OOD: ρ=1.5 cond pdf 0.094 vs v1's 0.32,
+    # ρ=3.5 cond pdf 0.032 vs v1's 0.20.
     guidance_type: Optional[str] = None  # "pdf", "adf", "xrd", "nd", "exafs", "xanes"
-    rho: float = 35.0
+    rho: float = 240.0
     ref_path: Optional[str] = None
     exp_data: Optional[str] = None
     spec_model_path: Optional[str] = None
@@ -86,19 +91,29 @@ class ExperimentConfig:
     qstep: float = 0.1  # XRD/ND
     biso: float = 1.5  # XRD/ND
 
-    # Tersoff-guidance defaults (unified HPO top-5 consensus).
+    # Tersoff-guidance defaults (v2_ood top-5 consensus).
+    # tersoff_lambda barely moved (0.22 → 0.20). The schedule shape
+    # converged on linear with a high t_gate; sigmoid is competitive at
+    # similar t_gate. Phase A's diagnostic experiments showed Tersoff is
+    # a ≤10% lever on its own — rho is the dominant guidance.
     tersoff_guidance: bool = True
-    tersoff_lambda: float = 0.22
+    tersoff_lambda: float = 0.20
     tersoff_schedule: str = "linear"
-    tersoff_t_gate: float = 0.75
+    tersoff_t_gate: float = 0.45
     tersoff_clamp: float = 10.0
 
-    # Sampler refinements (unified HPO top-5 consensus).
-    n_corr: int = 1
-    corr_step_size: float = 0.13
+    # Sampler refinements (v2_ood top-5 consensus).
+    # n_corr bumped 1 → 2: every top-5 trial used n_corr=2; the corrector
+    # is the main lever the OOD optimum used to compensate for prior bias.
+    # corr_step_size 0.13 → 0.12 (median; consistent with v1).
+    # corr_t_gate 0.37 → 0.58: corrector active for a much wider noise
+    # range than v1.
+    # t_schedule_rho 1.4 → 1.35 (essentially unchanged).
+    n_corr: int = 2
+    corr_step_size: float = 0.12
     corr_use_tersoff: bool = True
-    corr_t_gate: float = 0.37
-    t_schedule_rho: float = 1.4
+    corr_t_gate: float = 0.58
+    t_schedule_rho: float = 1.35
 
     # Simulated-annealing post-relaxation. The HPO study converged on
     # N_anneal=0 — the Langevin corrector already captures what SA would do,

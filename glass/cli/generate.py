@@ -622,7 +622,43 @@ def generate(
         if extra_tag:
             run_outdir = os.path.join(run_outdir, "_".join(extra_tag))
         os.makedirs(run_outdir, exist_ok=True)
-        
+
+        # Persist the full generation-hparam vector next to the outputs so
+        # downstream analysis can attribute each xyz to its exact config.
+        # The path-tag encoding is lossy (omits flags at default, rounds
+        # floats); params.json is the authoritative record.
+        import json as _json
+        params_record = {
+            "mode": "cond" if guidance_type else "uncond",
+            "guidance_type": guidance_type,
+            "rho": rho if guidance_type else None,
+            "ref_path": ref_path,
+            "exp_data": exp_data,
+            "tmin": tmin, "tmax": tmax, "tstep": tstep,
+            "t_schedule_rho": t_schedule_rho,
+            "cutoff": cutoff,
+            "tersoff_guidance": bool(tersoff_guidance),
+            "tersoff_lambda": tersoff_lambda if tersoff_guidance else None,
+            "tersoff_schedule": tersoff_schedule if tersoff_guidance else None,
+            "tersoff_t_gate": tersoff_t_gate if tersoff_guidance else None,
+            "tersoff_clamp": tersoff_clamp if tersoff_guidance else None,
+            "n_corr": n_corr,
+            "corr_step_size": corr_step_size if n_corr else None,
+            "corr_use_tersoff": corr_use_tersoff if n_corr else None,
+            "corr_t_gate": corr_t_gate if n_corr else None,
+            "sa_n_steps": sa_n_steps,
+            "sa_T0": sa_t0 if sa_n_steps else None,
+            "sa_T_end": sa_t_end if sa_n_steps else None,
+            "sa_lr": sa_lr if sa_n_steps else None,
+            "sa_lr_clamp": sa_lr_clamp if sa_n_steps else None,
+            "checkpoint": str(ckpt_path),
+            "n_runs": n_runs,
+            "init_file": init_file,
+            "sub_id": sub_id,
+        }
+        with open(os.path.join(run_outdir, "params.json"), "w") as _pf:
+            _json.dump(params_record, _pf, indent=2, default=str)
+
         # Prior function wrapper
         def prior_fn(sp, p, c, t, co, _sn=score_net, _df=diffuser):
             return compute_prior_score(sp, p, c, t, co, _sn, _df)

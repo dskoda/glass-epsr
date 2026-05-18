@@ -219,56 +219,104 @@ balance against `tersoff_λ` (see Default Parameters below).
 ### HPO and Default Parameters
 
 The inference defaults in `glass.experiment.ExperimentConfig` come from a
-**joint unconditional + PDF-conditional HPO study** (`glass_unified_v1`)
-run by `scripts/hpo_unified.py`. Each trial evaluates the same parameter
-vector in both modes; the trial objective is
-`0.5 · obj_uncond + 0.5 · obj_cond`, where each
-`obj_mode = 1.0 · pdf_rmse + 1.0 · coord_emd + 0.25 · adf_rmse`.
+**joint unconditional + PDF-conditional, multi-density HPO study**
+(`glass_unified_v2_ood`, 2026-05-14) run by `scripts/hpo_unified.py`.
+Each trial evaluates the same parameter vector in both modes at three
+densities (ρ ∈ {1.5, 2.5, 3.5}); the trial objective is
+`mean over densities of (0.5 · obj_uncond + 0.5 · obj_cond)`, where each
+`obj_mode = 1.0 · pdf_rmse + 2.0 · coord_emd + 0.25 · adf_rmse`. The
+`W_COORD=2.0` weighting (vs v1's 1.0) makes coord_emd parity with PDF
+the primary objective.
 
-Winning trial replay (10 inits × 5 seeds):
+Winning trial replay (5 inits × 5 seeds × 3 densities, n=75 per mode):
 
-| | obj | pdf_rmse | coord_emd | adf_rmse |
-|---|---|---|---|---|
-| Unconditional | 0.039 | 0.018 | 0.012 | 0.039 |
-| PDF-conditional | 0.046 | 0.013 | 0.023 | 0.042 |
+| Mode | pdf_rmse | coord_emd | adf_rmse |
+|---|---|---|---|
+| Unconditional (mean) | 0.408 | 0.896 | 0.072 |
+| PDF-conditional (mean) | **0.042** | 0.171 | 0.063 |
+
+Per-density breakdown of the best trial (cond mode, n=1×1):
+
+| Density | pdf_rmse | coord_emd | adf_rmse |
+|---|---|---|---|
+| ρ=1.5 (OOD) | 0.094 | 0.454 | 0.100 |
+| ρ=2.5 (in-distribution) | 0.019 | 0.019 | 0.031 |
+| ρ=3.5 (OOD) | 0.032 | 0.037 | 0.043 |
+
+For comparison, v1 (rho=35, single-density tuning) gave OOD cond
+pdf_rmse 0.30+ at ρ=1.5/3.5, so v2_ood **rescues OOD performance ~3-10×
+on PDF and ~5-30× on coord_emd** at the cost of slightly worse
+in-distribution coord (0.019 vs v1's 0.012).
 
 Defaults chosen as the **top-5 consensus** (median across best trials),
 not the literal winner, to avoid single-sample overfit:
 
-| Param | Value | Notes |
-|---|---|---|
-| `tmin` | 1e-4 | lower floor than v1 |
-| `tmax` | 0.54 | was 0.593 |
-| `tstep` | 128 | 4× cheaper than v1's 512 |
-| `t_schedule_rho` | **1.4** | **inverted** from v1's 0.55 — concentrates at low noise |
-| `tersoff_guidance` | true | — |
-| `tersoff_lambda` | 0.22 | — |
-| `tersoff_schedule` | linear | was constant |
-| `tersoff_t_gate` | 0.75 | ramp Tersoff in late |
-| `tersoff_clamp` | 10.0 | unchanged |
-| `n_corr` | 1 | — |
-| `corr_step_size` | 0.13 | ~½ of v1 |
-| `corr_t_gate` | 0.37 | tighter than v1's 0.6 |
-| `rho` (guidance) | **35.0** | **~25× lower** than prior 1000 — crucial |
-| `sa_n_steps` | 0 | SA hurts under the unified objective; disabled |
+| Param | v2_ood value | v1 value | Notes |
+|---|---|---|---|
+| `tmin` | 7e-4 | 1e-4 | tmin shifted up — converged trials had non-trivial floor |
+| `tmax` | **0.876** | 0.54 | substantially higher, integrates more high-noise prior |
+| `tstep` | 256 | 128 | 2× more steps (mode of top-5; range 128–256) |
+| `t_schedule_rho` | 1.35 | 1.4 | unchanged — both concentrate at low noise |
+| `tersoff_guidance` | true | true | — |
+| `tersoff_lambda` | 0.20 | 0.22 | unchanged within noise |
+| `tersoff_schedule` | linear | linear | mode of top-5; sigmoid is competitive |
+| `tersoff_t_gate` | 0.45 | 0.75 | unused for `linear` schedule (sigmoid only) |
+| `tersoff_clamp` | 10.0 | 10.0 | unchanged |
+| `n_corr` | **2** | 1 | every top-5 trial used n_corr=2 — biggest robust shift |
+| `corr_step_size` | 0.12 | 0.13 | unchanged within noise |
+| `corr_t_gate` | **0.58** | 0.37 | corrector active for a much wider noise range |
+| `rho` (guidance) | **240.0** | 35.0 | **~7× higher** — fixes OOD PDF underfit |
+| `sa_n_steps` | 0 | 0 | SA hurt in v1; v2_ood confirms with N_anneal=0 in all top-5 |
 
 **Why these changes matter:**
 
-- At `rho=1000` the PDF-likelihood gradient swamped `tersoff_λ=0.263`, so
-  the conditional path lost the coordination-number wins from Tersoff.
-  At `rho ≈ 35` all three score terms (prior, Tersoff, likelihood)
-  contribute in the same order of magnitude.
-- The inverted t-schedule (`t_rho: 0.55 → 1.4`) and `tstep: 512 → 128`
-  together give a faster, more MD-like trajectory that spends more
-  effective compute at low noise where the corrector is effective.
-- Every top-5 trial had `N_anneal=0`. The Langevin corrector inside the
-  main loop already captures what the SA tail was doing; running SA on
-  the Tersoff PES after conditional denoising undoes the likelihood fit.
+- v1 found rho=35 was optimal — but only because v1 tuned at ρ=2.5
+  alone, where the prior x_0_hat is already correct. At OOD densities
+  the prior is biased, and the PDF-likelihood gradient at rho=35 is too
+  weak to overcome it (PDF RMSE 0.30+ vs in-distribution 0.04). v2_ood
+  finds rho ≈ 240 — strong enough to correct the prior bias OOD, while
+  still acceptable in-distribution.
+- The biggest robust shift from v1 is `n_corr: 1 → 2`. Every top-5 trial
+  used 2 corrector steps. The corrector is the cheap way the optimizer
+  found to compensate for the larger PDF-gradient step (it polishes
+  local structure between predictor steps).
+- `corr_t_gate: 0.37 → 0.58` extends the corrector to higher-noise t,
+  where most structural decisions are made.
+- Every top-5 trial still has `N_anneal=0` — confirms the v1 finding
+  that SA on the Tersoff PES undoes the likelihood fit.
+- Tersoff parameters are essentially unchanged (λ=0.20 vs v1's 0.22).
+  Phase-A diagnostics showed Tersoff is a ≤10% lever on its own; rho is
+  the dominant guidance.
+
+### How v2_ood was tuned (Phase A → Phase C)
+
+The v1 → v2_ood shift came from a focused investigation in May 2026:
+
+1. **Phase A** (`research/density_extrapolation/experiments/phase_a/phase_a_matrix.sh`,
+   `phase_a_analyze.py`): rho × Tersoff × density matrix at OOD densities.
+   Found that rho is the dominant lever, Tersoff is ≤10% on its own, and
+   ρ=1.5 vs ρ=3.5 disagree on the joint optimum (rho=300 vs 100). No
+   single rho was pareto-optimal — motivated Phase C.
+2. **Phase C** (`scripts/hpo_unified.py` with `--init-globs`/`--ref-dirs`):
+   200-trial multi-density HPO with `W_COORD=2.0`. Found the values in
+   the table above.
+
+Diagnostic plots (each lives under its experiment's local results dir):
+- `research/density_extrapolation/experiments/phase_a/results/phase_a_pareto.png` —
+  PDF vs coord pareto by Tersoff config and density.
+- `research/density_extrapolation/experiments/h1_diagnostic/results/h1_diagnostic.png` —
+  first-peak position and coord vs density showing the density-blind prior.
+- `research/density_extrapolation/experiments/rho_sweep/results/rho_sweep.png` —
+  PDF / coord vs rho at ρ=1.5.
 
 ### Running / Extending the HPO
 
+The script supports both single-density (legacy) and multi-density modes.
+Multi-density uses `--init-globs` + `--ref-dirs` (parallel comma-separated
+lists, one entry per density bucket).
+
 ```bash
-# Full run (4 GPUs, ~2 h, 200 trials)
+# Single-density (legacy, ρ=2.5 only) — 4 GPUs, ~2 h, 200 trials
 python scripts/hpo_unified.py research/test/ \
     --ref-dir research/test/data/ \
     --init-dir /path/to/inits \
@@ -277,6 +325,16 @@ python scripts/hpo_unified.py research/test/ \
     --n-jobs 4 --devices cuda:0,cuda:1,cuda:2,cuda:3 \
     --study-name glass_unified_v2 \
     --storage research/hpo/glass_unified_v2.db
+
+# Multi-density (v2_ood pattern) — 4 GPUs, ~3 h, 200 trials
+python scripts/hpo_unified.py research/density_extrapolation/experiment/ \
+    --ref-dirs "research/density_extrapolation/results/generated/cond/density_1.5/reference,research/density_extrapolation/results/generated/cond/density_2.5/reference,research/density_extrapolation/results/generated/cond/density_3.5/reference" \
+    --init-dir research/density_extrapolation/experiment/inits \
+    --init-globs "init_Si_1.5_*.xyz,init_Si_2.5_*.xyz,init_Si_3.5_*.xyz" \
+    --n-trials 200 --n-seeds 1 --n-inits 1 \
+    --n-jobs 4 --devices cuda:0,cuda:1,cuda:2,cuda:3 \
+    --study-name glass_unified_v2_ood \
+    --storage research/hpo/glass_unified_v2_ood.db
 
 # Resume: re-run the exact same command (SQLite + load_if_exists=True)
 
