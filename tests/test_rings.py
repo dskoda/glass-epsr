@@ -446,3 +446,88 @@ class TestCRNGroundTruth:
             "Ring counts should decrease after peak"
         assert rings.ring_counts[7] > rings.ring_counts[8], \
             "Ring counts should decrease after peak"
+
+
+class TestNumbaEngine:
+    """Tests for the optional Numba-accelerated engine.
+
+    Skipped when numba is not installed. Compares numba vs python
+    engines for numerical parity and basic speedup.
+    """
+
+    def test_numba_matches_python_crn(self):
+        """Numba and Python engines must agree on CRN ring counts."""
+        pytest.importorskip("numba")
+        atoms = read(DATA_DIR / "CRN.xyz")
+
+        r_py = compute_rings(atoms, cutoff=2.85, maxlength=10,
+                             auto_cutoff=False, engine="python")
+        r_nb = compute_rings(atoms, cutoff=2.85, maxlength=10,
+                             auto_cutoff=False, engine="numba")
+
+        assert np.allclose(r_py.ring_counts, r_nb.ring_counts, atol=1e-6)
+        assert r_py.total_rings == pytest.approx(r_nb.total_rings, rel=1e-6)
+
+    def test_numba_matches_python_diamond(self):
+        """Numba and Python engines must agree on diamond Si."""
+        pytest.importorskip("numba")
+        atoms = bulk("Si", "diamond", a=5.43) * (2, 2, 2)
+
+        r_py = compute_rings(atoms, cutoff=2.8, maxlength=10,
+                             auto_cutoff=False, engine="python")
+        r_nb = compute_rings(atoms, cutoff=2.8, maxlength=10,
+                             auto_cutoff=False, engine="numba")
+
+        assert np.allclose(r_py.ring_counts, r_nb.ring_counts, atol=1e-6)
+
+    def test_numba_matches_python_amorphous(self):
+        """Numba and Python engines must agree on the small a-Si snapshot."""
+        pytest.importorskip("numba")
+        atoms = read(DATA_DIR / "Si_2.5_00.xyz")
+
+        r_py = compute_rings(atoms, cutoff=3.0, maxlength=10,
+                             auto_cutoff=False, engine="python")
+        r_nb = compute_rings(atoms, cutoff=3.0, maxlength=10,
+                             auto_cutoff=False, engine="numba")
+
+        assert np.allclose(r_py.ring_counts, r_nb.ring_counts, atol=1e-6)
+
+    def test_engine_auto_picks_numba_when_available(self):
+        """engine='auto' should pick numba when it's importable."""
+        pytest.importorskip("numba")
+        from glass.metrics.rings import _resolve_engine
+        assert _resolve_engine("auto") == "numba"
+
+    def test_engine_invalid_raises(self):
+        """Unknown engine string should raise ValueError."""
+        from glass.metrics.rings import _resolve_engine
+        with pytest.raises(ValueError):
+            _resolve_engine("rust")
+
+    @pytest.mark.slow
+    def test_numba_speedup_crn(self):
+        """Numba should be substantially faster than Python on CRN.
+
+        Loose threshold (3x) to avoid CI flakiness; in practice the
+        speedup is 10-30x depending on core count.
+        """
+        pytest.importorskip("numba")
+        import time
+        atoms = read(DATA_DIR / "CRN.xyz")
+
+        # Warm-up the numba JIT
+        compute_rings(atoms, cutoff=2.85, maxlength=10,
+                      auto_cutoff=False, engine="numba")
+
+        t0 = time.perf_counter()
+        compute_rings(atoms, cutoff=2.85, maxlength=10,
+                      auto_cutoff=False, engine="python")
+        t_py = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        compute_rings(atoms, cutoff=2.85, maxlength=10,
+                      auto_cutoff=False, engine="numba")
+        t_nb = time.perf_counter() - t0
+
+        assert t_py / t_nb > 3.0, \
+            f"Expected >3x speedup, got {t_py / t_nb:.1f}x (py={t_py:.2f}s, nb={t_nb:.3f}s)"

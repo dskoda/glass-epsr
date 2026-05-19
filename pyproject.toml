@@ -29,6 +29,7 @@ plot = [
     "tensorboard>=2.12",
 ]
 hpo = ["optuna>=3.5"]
+fast = ["numba>=0.59"]
 
 [project.scripts]
 glass = "glass.cli:glass"

@@ -371,6 +371,9 @@ When promoting a new best to defaults:
    - `glass metrics --include-rings` — include in comprehensive metrics
 4. Error metrics for rings are in `glass/metrics/errors.py`:
    - `rings_rmse`, `rings_mae`, `rings_cosine_similarity`, `rings_emd`, `rings_total_error`
+5. Algorithm details, correctness invariants, and the CRN reference
+   benchmark live in `docs/rings.md`. Read this before changing the
+   walker, the SP check, or the maxlength gate.
 
 ### Tuning Defaults
 

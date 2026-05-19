@@ -1,7 +1,10 @@
 """Ring statistics computation for atomic structures.
 
-This module implements the Franzblau shortest-path ring algorithm for 
+This module implements the Franzblau shortest-path ring algorithm for
 analyzing ring structures in atomic networks.
+
+Algorithm details, correctness invariants, and the CRN reference benchmark
+are documented in docs/rings.md.
 
 Reference:
     D.S. Franzblau, Phys. Rev. B 44, 4925 (1991)
@@ -340,21 +343,35 @@ def _find_sp_rings(
     return ringstat
 
 
+def _resolve_engine(engine: str) -> str:
+    """Resolve 'auto' → 'numba' if available, else 'python'."""
+    if engine == "auto":
+        try:
+            import numba  # noqa: F401
+            return "numba"
+        except ImportError:
+            return "python"
+    if engine not in ("python", "numba"):
+        raise ValueError(f"Unknown engine: {engine!r}; expected 'python', 'numba', or 'auto'")
+    return engine
+
+
 def compute_rings(
     atoms: Atoms,
     cutoff: Optional[float] = None,
     maxlength: int = 10,
     auto_cutoff: bool = True,
+    engine: str = "auto",
 ) -> RingMetrics:
     """Compute shortest-path ring statistics for atomic structures.
-    
+
     Implements the Franzblau algorithm for finding shortest-path rings
     in atomic networks. This is useful for characterizing the topology
     of amorphous materials.
-    
+
     Reference:
         D.S. Franzblau, Phys. Rev. B 44, 4925 (1991)
-    
+
     Args:
         atoms: ASE Atoms object
         cutoff: Cutoff for neighbor identification (Angstrom). If None and
@@ -362,10 +379,13 @@ def compute_rings(
         maxlength: Maximum ring size to consider
         auto_cutoff: If True and cutoff is None, automatically determine
             cutoff from PDF first minimum
-    
+        engine: 'auto' (default; numba if installed, else python),
+            'numba', or 'python'.
+
     Returns:
         RingMetrics object with ring statistics
     """
+    engine = _resolve_engine(engine)
     # Determine cutoff
     if cutoff is None:
         if auto_cutoff:
@@ -410,19 +430,22 @@ def compute_rings(
     neighbors = j[order]
     r = D[order]
     
-    # Compute distance matrix
-    dist = _compute_distance_matrix(nat, seed, neighbors)
-    
-    # Find shortest-path rings
-    ringstat = _find_sp_rings(nat, seed, neighbors, r, dist, maxlength)
-    
-    # Build result array
     ring_lengths = np.arange(0, maxlength + 1)
-    ring_counts = np.zeros(maxlength + 1, dtype=np.float64)
-    
-    for size, count in ringstat.items():
-        if 0 <= size <= maxlength:
-            ring_counts[size] = count
+
+    if engine == "numba":
+        from glass.metrics import _rings_numba as _nb
+        seed_i32 = seed.astype(np.int32)
+        neighbors_i32 = neighbors.astype(np.int32)
+        r_f64 = r.astype(np.float64)
+        dist = _nb.bfs_dist_matrix(seed_i32, neighbors_i32, nat)
+        ring_counts = _nb.find_sp_rings(seed_i32, neighbors_i32, r_f64, dist, maxlength)
+    else:
+        dist = _compute_distance_matrix(nat, seed, neighbors)
+        ringstat = _find_sp_rings(nat, seed, neighbors, r, dist, maxlength)
+        ring_counts = np.zeros(maxlength + 1, dtype=np.float64)
+        for size, count in ringstat.items():
+            if 0 <= size <= maxlength:
+                ring_counts[size] = count
     
     # Compute fractions
     total = np.sum(ring_counts)
@@ -446,15 +469,17 @@ def compute_rings_distribution(
     cutoff: Optional[float] = None,
     maxlength: int = 10,
     auto_cutoff: bool = True,
+    engine: str = "auto",
 ) -> RingMetrics:
     """Compute ring statistics averaged over multiple structures.
-    
+
     Args:
         atoms_list: List of ASE Atoms objects or a single Atoms object
         cutoff: Cutoff for neighbor identification
         maxlength: Maximum ring size to consider
         auto_cutoff: If True, automatically determine cutoff
-        
+        engine: 'auto' (default), 'numba', or 'python'.
+
     Returns:
         RingMetrics with averaged statistics
     """
@@ -469,7 +494,8 @@ def compute_rings_distribution(
     total_fractions = np.zeros(maxlength + 1, dtype=np.float64)
     
     for atoms in atoms_list:
-        metrics = compute_rings(atoms, cutoff=cutoff, maxlength=maxlength, auto_cutoff=auto_cutoff)
+        metrics = compute_rings(atoms, cutoff=cutoff, maxlength=maxlength,
+                                auto_cutoff=auto_cutoff, engine=engine)
         total_counts += metrics.ring_counts
         total_fractions += metrics.ring_fractions
     
