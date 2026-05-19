@@ -70,9 +70,20 @@ def test_snapshot_energy():
     pos, cell, pbc = _atoms_to_tensors(atoms)
     tc = torch_calc()
 
-    E = tc.energy(pos, cell, pbc).item()
+    E_torch = tc.energy(pos, cell, pbc).item()
 
-    assert abs(E + 936.3422548925636) < 1e-8, E
+    # Cross-check against ASE's reference Tersoff (3.25.0) implementation.
+    # This is the regression test for the (lambda3 * delta_r)^m bug fixed
+    # in Phase E (May 2026). The previous pinned value -936.342254... was
+    # itself buggy.
+    atoms.calc = ase_calc()
+    E_ase = atoms.get_potential_energy()
+
+    assert abs(E_torch - E_ase) < 1e-7, (E_torch, E_ase)
+    # Pin the correct value too, so a regression in either glass OR ase
+    # is caught. The reference value comes from a fresh evaluation post-fix
+    # (matches LAMMPS to ~1e-15 eV/atom, see Phase E).
+    assert abs(E_torch + 939.9234189560) < 1e-6, E_torch
 
 
 def test_snapshot_forces_autograd_vs_finite_diff():
