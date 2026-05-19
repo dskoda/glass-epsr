@@ -20,6 +20,7 @@ from glass.metrics import (
     compute_coordination,
     compute_dihedrals,
     compute_structure_factor,
+    compute_rings,
     StructuralMetrics,
 )
 from glass.metrics.utils import load_metrics_from_json
@@ -126,6 +127,19 @@ OUTPUT FORMAT:
     help="Compute Voronoi analysis using ovito.",
 )
 @click.option(
+    "--include-rings/--no-rings",
+    "include_rings",
+    default=False,
+    help="Compute ring statistics.",
+)
+@click.option(
+    "--rings-maxlength",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Maximum ring size to consider.",
+)
+@click.option(
     "--indent",
     type=int,
     default=2,
@@ -150,6 +164,8 @@ def metrics(
     include_dihedrals: bool,
     include_sq: bool,
     include_voronoi: bool,
+    include_rings: bool,
+    rings_maxlength: int,
     indent: int,
     output_format: str,
 ):
@@ -175,6 +191,8 @@ def metrics(
                 include_dihedrals=include_dihedrals,
                 include_sq=include_sq,
                 include_voronoi=include_voronoi,
+                include_rings=include_rings,
+                rings_maxlength=rings_maxlength,
             )
             
             # Store results
@@ -203,6 +221,17 @@ def metrics(
             if include_voronoi and metrics_obj.voronoi:
                 click.echo(f"  Voronoi: {len(metrics_obj.voronoi.index_histogram)} unique index types")
             
+            if include_rings and metrics_obj.rings:
+                click.echo(f"  Rings: {metrics_obj.rings.total_rings} found (maxlength={metrics_obj.rings.maxlength})")
+                # Show top ring sizes
+                ring_counts = metrics_obj.rings.ring_counts
+                if metrics_obj.rings.total_rings > 0:
+                    top_indices = np.argsort(ring_counts)[-3:][::-1]
+                    top_rings = [f"{int(i)}-member: {int(ring_counts[i])}" 
+                                 for i in top_indices if ring_counts[i] > 0]
+                    if top_rings:
+                        click.echo(f"    Top: {', '.join(top_rings)}")
+            
             click.echo()
             
         except Exception as e:
@@ -222,6 +251,8 @@ def metrics(
                     "include_dihedrals": include_dihedrals,
                     "include_sq": include_sq,
                     "include_voronoi": include_voronoi,
+                    "include_rings": include_rings,
+                    "rings_maxlength": rings_maxlength,
                 },
             },
             "structures": results,
@@ -305,6 +336,42 @@ def compute_coordination_command(structure: str, cutoff: Optional[float], output
     
     click.echo(f"Coordination saved to {output}")
     click.echo(f"Mean CN: {coord_metrics.mean_coordination:.2f} ± {coord_metrics.std_coordination:.2f}")
+
+
+@click.command("rings", help="Compute ring statistics.")
+@click.argument("structure", type=click.Path(exists=True))
+@click.option("--cutoff", type=float, default=None, help="Neighbor cutoff (auto-detected if not set)")
+@click.option("--maxlength", type=int, default=10, help="Maximum ring size")
+@click.option("--output", "-o", type=click.Path(), default="rings.json", help="Output file")
+def compute_rings_command(structure: str, cutoff: Optional[float], maxlength: int, output: str):
+    """Compute ring statistics for a single structure.
+    
+    Identifies shortest-path rings using the Franzblau algorithm.
+    """
+    atoms = read(structure)
+    rings_metrics = compute_rings(atoms, cutoff=cutoff, maxlength=maxlength, auto_cutoff=(cutoff is None))
+    
+    data = {
+        "ring_lengths": rings_metrics.ring_lengths.tolist(),
+        "ring_counts": rings_metrics.ring_counts.tolist(),
+        "ring_fractions": rings_metrics.ring_fractions.tolist(),
+        "total_rings": rings_metrics.total_rings,
+        "cutoff": rings_metrics.cutoff,
+        "maxlength": rings_metrics.maxlength,
+    }
+    
+    with open(output, 'w') as f:
+        json.dump(data, f, indent=2)
+    
+    click.echo(f"Ring statistics saved to {output}")
+    click.echo(f"Total rings: {rings_metrics.total_rings}")
+    if rings_metrics.total_rings > 0:
+        ring_counts = rings_metrics.ring_counts
+        top_indices = np.argsort(ring_counts)[-3:][::-1]
+        for idx in top_indices:
+            if ring_counts[idx] > 0:
+                frac = rings_metrics.ring_fractions[idx]
+                click.echo(f"  {int(idx)}-member: {int(ring_counts[idx])} ({frac:.1f}%)")
 
 
 @click.command(
@@ -491,4 +558,4 @@ def compare_command(
 
 
 # Export commands
-__all__ = ["metrics", "compute_pdf_command", "compute_coordination_command", "compare_command"]
+__all__ = ["metrics", "compute_pdf_command", "compute_coordination_command", "compute_rings_command", "compare_command"]

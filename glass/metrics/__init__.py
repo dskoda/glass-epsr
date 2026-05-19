@@ -1,7 +1,8 @@
 """Structural metrics computation for atomic structures.
 
 This module provides non-differentiable metrics for analyzing atomic structures,
-including PDF, ADF, coordination numbers, dihedral angles, and structure factors.
+including PDF, ADF, coordination numbers, dihedral angles, structure factors,
+and ring statistics.
 """
 
 # Core dataclasses
@@ -12,6 +13,7 @@ from glass.metrics.core import (
     DihedralMetrics,
     StructureFactorMetrics,
     VoronoiMetrics,
+    RingMetrics,
     StructuralMetrics,
 )
 
@@ -25,6 +27,12 @@ from glass.metrics.structural import (
 from glass.metrics.geometric import (
     compute_coordination,
     compute_dihedrals,
+)
+
+# Ring statistics metrics
+from glass.metrics.rings import (
+    compute_rings,
+    compute_rings_distribution,
 )
 
 # Advanced metrics (structure factor, Voronoi)
@@ -74,6 +82,8 @@ def compute_all_metrics(
     include_dihedrals: bool = True,
     include_sq: bool = True,
     include_voronoi: bool = True,
+    include_rings: bool = False,
+    rings_maxlength: int = 10,
 ) -> StructuralMetrics:
     """Compute all structural metrics for ASE Atoms.
     
@@ -88,6 +98,8 @@ def compute_all_metrics(
         include_dihedrals: Whether to compute dihedral angles
         include_sq: Whether to compute structure factor S(q)
         include_voronoi: Whether to compute Voronoi analysis
+        include_rings: Whether to compute ring statistics
+        rings_maxlength: Maximum ring size to consider (if include_rings=True)
     
     Returns:
         StructuralMetrics object with all computed metrics
@@ -123,6 +135,7 @@ def compute_all_metrics(
     dihedral_metrics = None
     sq_metrics = None
     voronoi_metrics = None
+    rings_metrics = None
     
     if include_dihedrals:
         dihedral_metrics = compute_dihedrals(atoms)
@@ -132,6 +145,11 @@ def compute_all_metrics(
     
     if include_voronoi:
         voronoi_metrics = compute_voronoi(atoms)
+    
+    if include_rings:
+        rings_metrics = compute_rings(
+            atoms, cutoff=coord_cutoff, maxlength=rings_maxlength, auto_cutoff=False
+        )
     
     return StructuralMetrics(
         n_atoms=n_atoms,
@@ -144,6 +162,7 @@ def compute_all_metrics(
         dihedrals=dihedral_metrics,
         structure_factor=sq_metrics,
         voronoi=voronoi_metrics,
+        rings=rings_metrics,
     )
 
 
@@ -155,6 +174,7 @@ __all__ = [
     'DihedralMetrics',
     'StructureFactorMetrics',
     'VoronoiMetrics',
+    'RingMetrics',
     'StructuralMetrics',
     # Computation functions
     'compute_pdf',
@@ -163,6 +183,8 @@ __all__ = [
     'compute_dihedrals',
     'compute_structure_factor',
     'compute_voronoi',
+    'compute_rings',
+    'compute_rings_distribution',
     'compute_all_metrics',
     # Error metrics
     'pdf_rmse',

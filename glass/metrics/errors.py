@@ -13,6 +13,7 @@ from glass.metrics.core import (
     PDFMetrics,
     ADFMetrics,
     CoordinationMetrics,
+    RingMetrics,
     StructuralMetrics,
 )
 
@@ -339,6 +340,138 @@ def coordination_std_error(ref: CoordinationMetrics, target: CoordinationMetrics
 
 
 # ============================================================================
+# Ring Statistics Error Metrics
+# ============================================================================
+
+def rings_rmse(ref: RingMetrics, target: RingMetrics) -> float:
+    """Compute RMSE between ring count distributions.
+    
+    Args:
+        ref: Reference ring metrics
+        target: Target ring metrics
+    
+    Returns:
+        RMSE value
+    """
+    # Use ring_counts (not fractions) for RMSE
+    counts_ref = ref.ring_counts.astype(float)
+    counts_target = target.ring_counts.astype(float)
+    
+    # Pad to common length
+    max_len = max(len(counts_ref), len(counts_target))
+    if len(counts_ref) < max_len:
+        counts_ref = np.pad(counts_ref, (0, max_len - len(counts_ref)))
+    if len(counts_target) < max_len:
+        counts_target = np.pad(counts_target, (0, max_len - len(counts_target)))
+    
+    mse = np.mean((counts_ref - counts_target) ** 2)
+    return float(np.sqrt(mse))
+
+
+def rings_mae(ref: RingMetrics, target: RingMetrics) -> float:
+    """Compute mean absolute error between ring count distributions.
+    
+    Args:
+        ref: Reference ring metrics
+        target: Target ring metrics
+    
+    Returns:
+        MAE value
+    """
+    counts_ref = ref.ring_counts.astype(float)
+    counts_target = target.ring_counts.astype(float)
+    
+    # Pad to common length
+    max_len = max(len(counts_ref), len(counts_target))
+    if len(counts_ref) < max_len:
+        counts_ref = np.pad(counts_ref, (0, max_len - len(counts_ref)))
+    if len(counts_target) < max_len:
+        counts_target = np.pad(counts_target, (0, max_len - len(counts_target)))
+    
+    return float(np.mean(np.abs(counts_ref - counts_target)))
+
+
+def rings_cosine_similarity(ref: RingMetrics, target: RingMetrics) -> float:
+    """Compute cosine similarity between ring distributions.
+    
+    Args:
+        ref: Reference ring metrics
+        target: Target ring metrics
+    
+    Returns:
+        Cosine similarity in [-1, 1]
+    """
+    # Use ring_counts for cosine similarity
+    counts_ref = ref.ring_counts.astype(float)
+    counts_target = target.ring_counts.astype(float)
+    
+    # Pad to common length
+    max_len = max(len(counts_ref), len(counts_target))
+    if len(counts_ref) < max_len:
+        counts_ref = np.pad(counts_ref, (0, max_len - len(counts_ref)))
+    if len(counts_target) < max_len:
+        counts_target = np.pad(counts_target, (0, max_len - len(counts_target)))
+    
+    dot_product = np.sum(counts_ref * counts_target)
+    norm_ref = np.sqrt(np.sum(counts_ref ** 2))
+    norm_target = np.sqrt(np.sum(counts_target ** 2))
+    
+    if norm_ref == 0 or norm_target == 0:
+        return 0.0
+    
+    return float(dot_product / (norm_ref * norm_target))
+
+
+def rings_emd(ref: RingMetrics, target: RingMetrics) -> float:
+    """Compute Earth Mover's Distance (Wasserstein) between ring distributions.
+    
+    Args:
+        ref: Reference ring metrics
+        target: Target ring metrics
+    
+    Returns:
+        EMD/Wasserstein distance
+    """
+    # Normalize to probability distributions
+    hist_ref = ref.ring_counts.astype(float)
+    hist_ref = hist_ref / hist_ref.sum() if hist_ref.sum() > 0 else hist_ref
+    
+    hist_target = target.ring_counts.astype(float)
+    hist_target = hist_target / hist_target.sum() if hist_target.sum() > 0 else hist_target
+    
+    # Pad to common length
+    max_len = max(len(hist_ref), len(hist_target))
+    if len(hist_ref) < max_len:
+        hist_ref = np.pad(hist_ref, (0, max_len - len(hist_ref)))
+    if len(hist_target) < max_len:
+        hist_target = np.pad(hist_target, (0, max_len - len(hist_target)))
+    
+    # The positions are the ring lengths themselves [0, 1, 2, ...]
+    positions = np.arange(max_len).astype(float)
+    
+    return float(wasserstein_distance(positions, positions, hist_ref, hist_target))
+
+
+def rings_total_error(ref: RingMetrics, target: RingMetrics) -> float:
+    """Compute relative error in total number of rings.
+    
+    Args:
+        ref: Reference ring metrics
+        target: Target ring metrics
+    
+    Returns:
+        Relative error in total ring count
+    """
+    if ref.total_rings == 0:
+        if target.total_rings == 0:
+            return 0.0
+        return float(abs(target.total_rings))
+    
+    rel_error = abs(ref.total_rings - target.total_rings) / ref.total_rings
+    return float(rel_error)
+
+
+# ============================================================================
 # Combined Error Metrics
 # ============================================================================
 
@@ -375,6 +508,14 @@ def compute_all_errors(
     errors['coordination_rmse'] = coordination_histogram_rmse(ref.coordination, target.coordination)
     errors['coordination_mean_error'] = coordination_mean_error(ref.coordination, target.coordination)
     errors['coordination_std_error'] = coordination_std_error(ref.coordination, target.coordination)
+    
+    # Ring statistics errors (if available)
+    if ref.rings is not None and target.rings is not None:
+        errors['rings_rmse'] = rings_rmse(ref.rings, target.rings)
+        errors['rings_mae'] = rings_mae(ref.rings, target.rings)
+        errors['rings_cosine'] = rings_cosine_similarity(ref.rings, target.rings)
+        errors['rings_emd'] = rings_emd(ref.rings, target.rings)
+        errors['rings_total_error'] = rings_total_error(ref.rings, target.rings)
     
     return errors
 

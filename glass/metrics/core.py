@@ -180,6 +180,37 @@ class VoronoiMetrics:
 
 
 @dataclass
+class RingMetrics:
+    """Container for ring statistics metrics.
+    
+    Attributes:
+        ring_lengths: Array of ring sizes (0 to maxlength)
+        ring_counts: Count of rings for each size
+        ring_fractions: Fractional distribution (percentage) for each ring size
+        total_rings: Total number of rings found
+        cutoff: Cutoff used for neighbor identification
+        maxlength: Maximum ring size considered
+    """
+    ring_lengths: np.ndarray
+    ring_counts: np.ndarray
+    ring_fractions: np.ndarray
+    total_rings: int
+    cutoff: float
+    maxlength: int
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "ring_lengths": self.ring_lengths.tolist(),
+            "ring_counts": self.ring_counts.tolist(),
+            "ring_fractions": self.ring_fractions.tolist(),
+            "total_rings": self.total_rings,
+            "cutoff": self.cutoff,
+            "maxlength": self.maxlength,
+        }
+
+
+@dataclass
 class StructuralMetrics:
     """Complete structural metrics for a single structure.
     
@@ -194,6 +225,7 @@ class StructuralMetrics:
         dihedrals: Dihedral metrics (optional)
         structure_factor: Structure factor metrics (optional)
         voronoi: Voronoi metrics (optional)
+        rings: Ring statistics metrics (optional)
     """
     n_atoms: int
     composition: str
@@ -205,6 +237,7 @@ class StructuralMetrics:
     dihedrals: Optional['DihedralMetrics'] = None
     structure_factor: Optional['StructureFactorMetrics'] = None
     voronoi: Optional['VoronoiMetrics'] = None
+    rings: Optional['RingMetrics'] = None
     
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization."""
@@ -226,6 +259,8 @@ class StructuralMetrics:
             result["structure_factor"] = self.structure_factor.to_dict()
         if self.voronoi is not None:
             result["voronoi"] = self.voronoi.to_dict()
+        if self.rings is not None:
+            result["rings"] = self.rings.to_dict()
         return result
     
     def to_json(self, filepath: Union[str, Path], indent: int = 2) -> None:
