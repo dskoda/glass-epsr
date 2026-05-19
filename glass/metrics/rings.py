@@ -159,6 +159,7 @@ def _step_away(
     r: np.ndarray,
     dist: np.ndarray,
     maxlength: int,
+    done: np.ndarray,
 ) -> bool:
     """Step away from root vertex during ring search.
     
@@ -169,18 +170,21 @@ def _step_away(
     for ni in range(seed[i], seed[i + 1]):
         j = neighbors[ni]
         
-        # Skip if already visited (would create reverse jump)
-        if j == walker.previous_vertex:
+        # Check if edge has already been visited or if vertex is identical to
+        # previous vertex of walker (this would be a reverse jump)
+        if done[ni] or j == walker.previous_vertex:
             continue
         
-        # Check if stepping away from root
+        # Did we jump farther away from the root vertex?
         if dist[root, j] == dist[root, i] + 1:
-            # Don't exceed half the maximum ring length
-            if maxlength < 0 or walker.ring_size() < (maxlength - 1) // 2:
+            # Don't continue stepping further if we are already at half the
+            # maximum ring length
+            if maxlength < 0 or walker.ring_size() < (maxlength + 1) // 2:
                 step_dist = r[ni]
                 walkers.append(walker.copy_with_step(j, step_dist))
-        # Check if stepping back toward root (mark as negative)
+        # Did we either not change distance from root vertex or moved closer?
         elif dist[root, j] == dist[root, i] or dist[root, j] == dist[root, i] - 1:
+            # This is a jump back towards the root
             step_dist = r[ni]
             new_walker = walker.copy_with_step(-j, step_dist)
             walkers.append(new_walker)
@@ -201,7 +205,7 @@ def _step_closer(
     r: np.ndarray,
     dist: np.ndarray,
     ringstat: dict,
-    done: set,
+    done: np.ndarray,
 ) -> bool:
     """Step closer to root vertex during ring search.
     
@@ -212,26 +216,29 @@ def _step_closer(
     for ni in range(seed[i], seed[i + 1]):
         j = neighbors[ni]
         
-        # Skip if already visited
-        if j == walker.previous_vertex:
+        # Check if edge has already been visited or if vertex is identical to
+        # previous vertex of walker (this would be a reverse jump)
+        if done[ni] or j == walker.previous_vertex:
             continue
         
-        # Check if back to root
+        # Are we back to the root vertex?
         if j == root:
-            # Check closure condition: sum of bond vectors should be ~0
+            # Check if the sum of bond vectors is zero. This is to
+            # exclude chains that cross periodic boundaries.
             droot = walker.distances_to_root[-1]
             d = r[ni] + droot
             
             TOL = 0.0001
             if _normsq(d) < TOL:
-                # Check if this is a shortest-path ring
+                # Now we need to check whether this ring is SP
                 is_sp = True
-                ring_size = walker.ring_size() + 1  # +1 for root
                 
-                # Add root to ring vertices
+                # Add the root vertex
                 ring_vertices = walker.ring_vertices + [root]
+                ring_size = len(ring_vertices)
                 
-                # Check all pairs in ring
+                # Check if the length along the ring agrees with the map
+                # distance. Otherwise, there is a short ring that cuts this one.
                 for m in range(ring_size):
                     for n in range(m + 1, ring_size):
                         dn = n - m
@@ -248,13 +255,13 @@ def _step_closer(
                 
                 if is_sp:
                     if ring_size not in ringstat:
-                        ringstat[ring_size] = 0
-                    ringstat[ring_size] += 1
-        # Continue stepping closer
+                        ringstat[ring_size] = 0.0
+                    ringstat[ring_size] += 1.0 / ring_size
+        # Did we jump closer to the root vertex?
         elif dist[root, j] == dist[root, i] - 1:
             step_dist = r[ni]
             walkers.append(walker.copy_with_step(-j, step_dist))
-        # Otherwise discard path
+        # We discard this path if we jump away again
     
     return True
 
@@ -281,9 +288,11 @@ def _find_sp_rings(
         Dictionary mapping ring size to count
     """
     ringstat = {}
+    nneigh = len(neighbors)
     
-    # Loop over all edges (bonds)
+    # Loop over all vertices
     for a in range(nat):
+        # Loop over neighbours of vertex a, i.e. walk on graph
         for na in range(seed[a], seed[a + 1]):
             b = neighbors[na]
             
@@ -291,38 +300,41 @@ def _find_sp_rings(
             if a >= b:
                 continue
             
-            # Mark edge as visited
-            done = set()
-            done.add(na)
+            # Create done array for this starting edge
+            # We have visited this site. Mark edge and its reverse as visited.
+            done = np.zeros(nneigh, dtype=bool)
+            done[na] = True
             
             # Mark reverse edge as visited
             for ni in range(seed[b], seed[b + 1]):
                 if neighbors[ni] == a:
-                    done.add(ni)
+                    done[ni] = True
                     break
             
             # Initialize walker on atom b coming from atom a
             initial_dist = r[na]
             walkers = [_Walker(b, a, initial_dist)]
             
-            # Walk until no more walkers
+            # Continue loop while there are walkers active
             while walkers:
                 new_walkers = []
                 
+                # Loop over all walkers and advance them
                 for walker in walkers:
+                    # Walker walks away from root
                     if walker.vertex > 0:
-                        # Walking away from root
                         if not _step_away(
-                            new_walkers, walker, a, nat, seed, neighbors, r, dist, maxlength
+                            new_walkers, walker, a, nat, seed, neighbors, r, dist, maxlength, done
                         ):
                             return {}
+                    # Walker walks towards root
                     else:
-                        # Walking toward root
                         if not _step_closer(
                             new_walkers, walker, a, nat, seed, neighbors, r, dist, ringstat, done
                         ):
                             return {}
                 
+                # Copy new walker list to old walker list
                 walkers = new_walkers
     
     return ringstat
@@ -379,9 +391,9 @@ def compute_rings(
         ring_lengths = np.arange(0, maxlength + 1)
         return RingMetrics(
             ring_lengths=ring_lengths,
-            ring_counts=np.zeros(maxlength + 1, dtype=np.int64),
+            ring_counts=np.zeros(maxlength + 1, dtype=np.float64),
             ring_fractions=np.zeros(maxlength + 1),
-            total_rings=0,
+            total_rings=0.0,
             cutoff=cutoff,
             maxlength=maxlength,
         )
@@ -406,7 +418,7 @@ def compute_rings(
     
     # Build result array
     ring_lengths = np.arange(0, maxlength + 1)
-    ring_counts = np.zeros(maxlength + 1, dtype=np.int64)
+    ring_counts = np.zeros(maxlength + 1, dtype=np.float64)
     
     for size, count in ringstat.items():
         if 0 <= size <= maxlength:
@@ -423,7 +435,7 @@ def compute_rings(
         ring_lengths=ring_lengths,
         ring_counts=ring_counts,
         ring_fractions=ring_fractions,
-        total_rings=int(total),
+        total_rings=float(total),
         cutoff=cutoff,
         maxlength=maxlength,
     )
@@ -471,7 +483,7 @@ def compute_rings_distribution(
         ring_lengths=ring_lengths,
         ring_counts=avg_counts,
         ring_fractions=avg_fractions,
-        total_rings=int(np.sum(avg_counts)),
+        total_rings=float(np.sum(avg_counts)),
         cutoff=cutoff if cutoff else 0.0,
         maxlength=maxlength,
     )

@@ -185,7 +185,8 @@ class RingMetrics:
     
     Attributes:
         ring_lengths: Array of ring sizes (0 to maxlength)
-        ring_counts: Count of rings for each size
+        ring_counts: Count of rings for each size (float; fractional values
+            arise only when averaging across frames)
         ring_fractions: Fractional distribution (percentage) for each ring size
         total_rings: Total number of rings found
         cutoff: Cutoff used for neighbor identification
@@ -194,7 +195,7 @@ class RingMetrics:
     ring_lengths: np.ndarray
     ring_counts: np.ndarray
     ring_fractions: np.ndarray
-    total_rings: int
+    total_rings: float
     cutoff: float
     maxlength: int
     
