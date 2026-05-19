@@ -24,7 +24,7 @@ A single Python package `glass` (defined by `./pyproject.toml`) for generative m
    - Scales to 10 000+ atoms via cell-list neighbour enumeration
 
 4. **`glass.metrics`** — Structural analysis (non-differentiable)
-   - PDF, ADF, coordination numbers, dihedrals, S(q), Voronoi
+   - PDF, ADF, coordination numbers, dihedrals, S(q), Voronoi, ring statistics
    - Error metrics: RMSE, cosine similarity, EMD, R-chi²
 
 5. **`glass.utils.packing`** — Cell-list Poisson-disk + WCA Monte-Carlo fallback
@@ -76,6 +76,7 @@ KMP_DUPLICATE_LIB_OK=TRUE pytest -v
 │   │   ├── structural.py               # PDF, ADF
 │   │   ├── geometric.py                # Coordination, dihedrals
 │   │   ├── advanced.py                 # S(q), Voronoi
+│   │   ├── rings.py                    # Ring statistics (Franzblau algorithm)
 │   │   ├── errors.py                   # compute_all_errors
 │   │   └── utils.py
 │   ├── potentials/tersoff/             # Tersoff
@@ -155,10 +156,12 @@ glass generate ./my_experiment --inits ./inits/ \
 ```bash
 glass metrics structure.xyz --output metrics.json
 glass metrics ./structures/*.xyz --output metrics.json
+glass metrics structure.xyz --include-rings --rings-maxlength 12  # include ring stats
 glass compare ref.xyz target.xyz
 glass compare ref.json target.json --from-json
 glass pdf structure.xyz --output pdf.json
 glass coordination structure.xyz --output coord.json
+glass rings structure.xyz --cutoff 3.0 --maxlength 10  # standalone ring stats
 ```
 
 ### Tersoff Potential
@@ -308,6 +311,7 @@ When promoting a new best to defaults:
 - PDF/ADF: RMSE, MAE, area between curves, cosine similarity, R-chi².
 - Coordination: EMD (Wasserstein), histogram RMSE, mean/std error.
 - Peak: position error, height error.
+- Rings: RMSE, MAE, cosine similarity, EMD, total count error.
 
 ### Tersoff Potential Notes
 
@@ -358,6 +362,19 @@ When promoting a new best to defaults:
 4. If you want the HPO to optimise it, add a weight constant at the top
    of `scripts/hpo_unified.py` and include it in `_mode_obj`.
 
+### New Ring Statistics Feature
+
+1. The ring statistics module is at `glass/metrics/rings.py`.
+2. Uses the Franzblau shortest-path algorithm (Python implementation).
+3. CLI commands:
+   - `glass rings structure.xyz` — standalone ring analysis
+   - `glass metrics --include-rings` — include in comprehensive metrics
+4. Error metrics for rings are in `glass/metrics/errors.py`:
+   - `rings_rmse`, `rings_mae`, `rings_cosine_similarity`, `rings_emd`, `rings_total_error`
+5. Algorithm details, correctness invariants, and the CRN reference
+   benchmark live in `docs/rings.md`. Read this before changing the
+   walker, the SP check, or the maxlength gate.
+
 ### Tuning Defaults
 
 **Don't hand-tune defaults in a PR.** Run the unified HPO (even a short
@@ -375,3 +392,4 @@ When promoting a new best to defaults:
 - `tests/test_sampling_corrector.py` — composition tests (prior + Tersoff
   + stub likelihood + corrector + SA tail).
 - `tests/test_tersoff.py`, `tests/test_metrics.py` — reference physics checks.
+- `tests/test_rings.py` — ring statistics tests (Franzblau algorithm).

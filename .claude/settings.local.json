@@ -76,7 +76,12 @@
       "Bash(nohup env KMP_DUPLICATE_LIB_OK=TRUE PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/hpo_unified.py research/density_extrapolation/experiment/ --ref-dirs research/density_extrapolation/results/generated/cond/density_1.5/reference,research/density_extrapolation/results/generated/cond/density_2.5/reference,research/density_extrapolation/results/generated/cond/density_3.5/reference --init-dir research/density_extrapolation/experiment/inits --init-globs init_Si_1.5_*.xyz,init_Si_2.5_*.xyz,init_Si_3.5_*.xyz --n-trials 200 --n-seeds 1 --n-inits 1 --n-jobs 4 --devices cuda:0,cuda:1,cuda:2,cuda:3 --study-name glass_unified_v3_ood --storage research/hpo/glass_unified_v3_ood.db)",
       "Bash(nohup bash research/density_extrapolation/experiments/phase_f_iterated/run_matrix.sh)",
       "Bash(nohup env KMP_DUPLICATE_LIB_OK=TRUE PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=1 python scripts/hpo_unified.py research/density_extrapolation/experiment/ --ref-dirs research/density_extrapolation/results/generated/cond/density_1.5/reference,research/density_extrapolation/results/generated/cond/density_2.5/reference,research/density_extrapolation/results/generated/cond/density_3.5/reference --init-dir research/density_extrapolation/experiment/inits --init-globs init_Si_1.5_*.xyz,init_Si_2.5_*.xyz,init_Si_3.5_*.xyz --n-trials 1 --n-seeds 5 --n-inits 5 --n-jobs 1 --devices cuda:0 --study-name glass_unified_v3_ood --storage research/hpo/glass_unified_v3_ood.db --replay-best)",
-      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_experiment.py tests/test_hpo_objective.py tests/test_tersoff.py tests/test_iterated.py -q)"
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_experiment.py tests/test_hpo_objective.py tests/test_tersoff.py tests/test_iterated.py -q)",
+      "Bash(python3 *)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_rings.py -v)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_rings.py::TestRingPerformance::test_compute_rings_scaling -v)",
+      "Bash(git stash *)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_metrics.py)"
     ]
   }
 }
