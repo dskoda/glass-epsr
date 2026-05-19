@@ -218,10 +218,11 @@ balance against `tersoff_λ` (see Default Parameters below).
 
 ### HPO and Default Parameters
 
-The inference defaults in `glass.experiment.ExperimentConfig` come from a
-**joint unconditional + PDF-conditional, multi-density HPO study**
-(`glass_unified_v2_ood`, 2026-05-14) run by `scripts/hpo_unified.py`.
-Each trial evaluates the same parameter vector in both modes at three
+The inference defaults in `glass.experiment.ExperimentConfig` come from
+**`glass_unified_v3_ood`** (2026-05-18, `scripts/hpo_unified.py`), run
+**after the Phase E Tersoff implementation bug was fixed** (see
+"Tersoff implementation history" below). Each trial evaluates the same
+parameter vector in unconditional and PDF-conditional modes at three
 densities (ρ ∈ {1.5, 2.5, 3.5}); the trial objective is
 `mean over densities of (0.5 · obj_uncond + 0.5 · obj_cond)`, where each
 `obj_mode = 1.0 · pdf_rmse + 2.0 · coord_emd + 0.25 · adf_rmse`. The
@@ -232,74 +233,103 @@ Winning trial replay (5 inits × 5 seeds × 3 densities, n=75 per mode):
 
 | Mode | pdf_rmse | coord_emd | adf_rmse |
 |---|---|---|---|
-| Unconditional (mean) | 0.408 | 0.896 | 0.072 |
-| PDF-conditional (mean) | **0.042** | 0.171 | 0.063 |
+| Unconditional (mean) | 0.429 | 0.872 | 0.071 |
+| PDF-conditional (mean) | **0.028** | 0.173 | 0.060 |
 
 Per-density breakdown of the best trial (cond mode, n=1×1):
 
 | Density | pdf_rmse | coord_emd | adf_rmse |
 |---|---|---|---|
-| ρ=1.5 (OOD) | 0.094 | 0.454 | 0.100 |
-| ρ=2.5 (in-distribution) | 0.019 | 0.019 | 0.031 |
-| ρ=3.5 (OOD) | 0.032 | 0.037 | 0.043 |
+| ρ=1.5 (OOD) | 0.056 | 0.380 | 0.073 |
+| ρ=2.5 (in-distribution) | 0.012 | 0.019 | 0.045 |
+| ρ=3.5 (OOD) | 0.020 | 0.009 | 0.033 |
 
-For comparison, v1 (rho=35, single-density tuning) gave OOD cond
-pdf_rmse 0.30+ at ρ=1.5/3.5, so v2_ood **rescues OOD performance ~3-10×
-on PDF and ~5-30× on coord_emd** at the cost of slightly worse
-in-distribution coord (0.019 vs v1's 0.012).
+v3_ood vs v2_ood (cond mode, replay 5×5×3): cond pdf_rmse improves
+0.042 → 0.028 (33%) with coord_emd essentially unchanged (0.171 →
+0.173). The big wins come from the bug-fix: at the per-trial level,
+ρ=2.5 cond pdf 0.019 → 0.012 and ρ=3.5 cond pdf 0.032 → 0.020.
 
-Defaults chosen as the **top-5 consensus** (median across best trials),
-not the literal winner, to avoid single-sample overfit:
+Defaults chosen as the **top-5 consensus** (median for floats, mode
+for categoricals across the 5 best trials), not the literal winner:
 
-| Param | v2_ood value | v1 value | Notes |
+| Param | v3_ood (current) | v2_ood (pre-fix) | v1 (in-dist only) | Notes |
+|---|---|---|---|---|
+| `tmin` | 4e-4 | 7e-4 | 1e-4 | unchanged-ish |
+| `tmax` | 0.834 | 0.876 | 0.54 | unchanged |
+| `tstep` | **512** | 256 | 128 | mode 5/5 in top-5; doubled again |
+| `t_schedule_rho` | **0.98** | 1.35 | 1.4 | back to ~uniform — fixed Tersoff makes high-t informative |
+| `tersoff_guidance` | true | true | true | — |
+| `tersoff_lambda` | 0.23 | 0.20 | 0.22 | slight increase |
+| `tersoff_schedule` | **sigmoid** | linear | linear | mode 2/5 (linear competitive); sigmoid + low t_gate = mid-trajectory active |
+| `tersoff_t_gate` | **0.15** | 0.45 | 0.75 | Tersoff now activates *early* (high t) rather than only near the end |
+| `tersoff_clamp` | 10.0 | 10.0 | 10.0 | unchanged |
+| `n_corr` | **1** | 2 | 1 | top-5 unanimous on 1; the corrector polish role gone with bug fix |
+| `corr_step_size` | **0.30** | 0.12 | 0.13 | larger steps, fewer of them |
+| `corr_t_gate` | **0.79** | 0.58 | 0.37 | corrector now active over much wider noise range |
+| `rho` (guidance) | **737.0** | 240.0 | 35.0 | **~3× higher than v2** — fixed Tersoff lets cond run hotter |
+| `sa_n_steps` | 0 | 0 | 0 | SA still off; v3 confirms |
+
+**Why these changes matter (v2_ood → v3_ood):**
+
+- The Phase E Tersoff fix removed up to 180 meV/atom and 0.78 eV/Å
+  RMS force errors at OOD densities. Once the angular term is computed
+  correctly, Tersoff behaves like an actual energy term (not a noise
+  term), so the optimizer can run the rest of the sampler more
+  aggressively.
+- `rho: 240 → 737` — the conditional gradient can now safely dominate
+  the score at low t, because the score's bias on the local angular
+  geometry is being absorbed by the (now-correct) Tersoff term.
+- `n_corr: 2 → 1` — the corrector's role of polishing structure between
+  predictor steps was a workaround for the buggy Tersoff. With the fix,
+  one predictor step is enough.
+- `tersoff_t_gate: 0.45 → 0.15` and `schedule: linear → sigmoid` mean
+  Tersoff is now active during structural-decision-time (mid noise)
+  rather than only at the very end. Consistent with Tersoff actually
+  doing something useful now.
+- `t_schedule_rho: 1.35 → 0.98` — the "concentrate at low noise"
+  v2_ood/v1 trick reflected that high-noise steps were noisy under the
+  buggy Tersoff. With the fix, near-uniform t spacing wins.
+
+### Tersoff implementation history (Phase E)
+
+In May 2026, a cross-check against LAMMPS (`research/density_extrapolation/experiments/phase_e_lammps_xcheck/`)
+revealed an operator-precedence bug in
+`glass/potentials/tersoff/potential.py`. The angular-term exponent
+argument was written as `λ₃ · Δr^m` instead of `(λ₃ · Δr)^m`. The two
+expressions agree on diamond Si (Δr = 0 for every triple) but
+diverge in amorphous structures, with magnitude growing with density
+(more neighbour pairs in the cutoff fringe):
+
+| density | pre-fix \|E_glass − E_lammps\|/atom | RMS force diff | post-fix |
 |---|---|---|---|
-| `tmin` | 7e-4 | 1e-4 | tmin shifted up — converged trials had non-trivial floor |
-| `tmax` | **0.876** | 0.54 | substantially higher, integrates more high-noise prior |
-| `tstep` | 256 | 128 | 2× more steps (mode of top-5; range 128–256) |
-| `t_schedule_rho` | 1.35 | 1.4 | unchanged — both concentrate at low noise |
-| `tersoff_guidance` | true | true | — |
-| `tersoff_lambda` | 0.20 | 0.22 | unchanged within noise |
-| `tersoff_schedule` | linear | linear | mode of top-5; sigmoid is competitive |
-| `tersoff_t_gate` | 0.45 | 0.75 | unused for `linear` schedule (sigmoid only) |
-| `tersoff_clamp` | 10.0 | 10.0 | unchanged |
-| `n_corr` | **2** | 1 | every top-5 trial used n_corr=2 — biggest robust shift |
-| `corr_step_size` | 0.12 | 0.13 | unchanged within noise |
-| `corr_t_gate` | **0.58** | 0.37 | corrector active for a much wider noise range |
-| `rho` (guidance) | **240.0** | 35.0 | **~7× higher** — fixes OOD PDF underfit |
-| `sa_n_steps` | 0 | 0 | SA hurt in v1; v2_ood confirms with N_anneal=0 in all top-5 |
+| 1.5 | 7.6 × 10⁻⁵ eV | 0.022 eV/Å | 1.9 × 10⁻¹⁵ eV |
+| 2.5 (training) | 1.7 × 10⁻² eV (17 meV) | 0.24 eV/Å | 4.2 × 10⁻¹⁵ eV |
+| 3.5 | 1.8 × 10⁻¹ eV (180 meV) | 0.78 eV/Å | 4.4 × 10⁻¹⁵ eV |
 
-**Why these changes matter:**
+After the fix, glass torch Tersoff is bit-equivalent to LAMMPS at
+machine precision (~1e-15 eV/atom) on all 30 reference structures.
+ASE 3.25's reference Tersoff also agrees. `tests/test_tersoff.py`
+now cross-checks against ASE on the amorphous Si_2.5_00.xyz snapshot
+to prevent regression.
 
-- v1 found rho=35 was optimal — but only because v1 tuned at ρ=2.5
-  alone, where the prior x_0_hat is already correct. At OOD densities
-  the prior is biased, and the PDF-likelihood gradient at rho=35 is too
-  weak to overcome it (PDF RMSE 0.30+ vs in-distribution 0.04). v2_ood
-  finds rho ≈ 240 — strong enough to correct the prior bias OOD, while
-  still acceptable in-distribution.
-- The biggest robust shift from v1 is `n_corr: 1 → 2`. Every top-5 trial
-  used 2 corrector steps. The corrector is the cheap way the optimizer
-  found to compensate for the larger PDF-gradient step (it polishes
-  local structure between predictor steps).
-- `corr_t_gate: 0.37 → 0.58` extends the corrector to higher-noise t,
-  where most structural decisions are made.
-- Every top-5 trial still has `N_anneal=0` — confirms the v1 finding
-  that SA on the Tersoff PES undoes the likelihood fit.
-- Tersoff parameters are essentially unchanged (λ=0.20 vs v1's 0.22).
-  Phase-A diagnostics showed Tersoff is a ≤10% lever on its own; rho is
-  the dominant guidance.
+### How v3_ood was tuned (Phase A → Phase F)
 
-### How v2_ood was tuned (Phase A → Phase C)
+The v1 → v2_ood → v3_ood progression came from a five-month
+investigation in May 2026:
 
-The v1 → v2_ood shift came from a focused investigation in May 2026:
-
-1. **Phase A** (`research/density_extrapolation/experiments/phase_a/phase_a_matrix.sh`,
-   `phase_a_analyze.py`): rho × Tersoff × density matrix at OOD densities.
-   Found that rho is the dominant lever, Tersoff is ≤10% on its own, and
-   ρ=1.5 vs ρ=3.5 disagree on the joint optimum (rho=300 vs 100). No
-   single rho was pareto-optimal — motivated Phase C.
-2. **Phase C** (`scripts/hpo_unified.py` with `--init-globs`/`--ref-dirs`):
-   200-trial multi-density HPO with `W_COORD=2.0`. Found the values in
-   the table above.
+1. **Phase A** (`research/density_extrapolation/experiments/phase_a/`):
+   rho × Tersoff × density matrix at OOD densities. Found that rho
+   is the dominant lever and ρ=1.5 vs ρ=3.5 disagree on the joint
+   optimum, motivating multi-density HPO.
+2. **Phase B** (provisional rho=300 promotion).
+3. **Phase C** (multi-density HPO `glass_unified_v2_ood`).
+4. **Phase D** (post-hoc Tersoff treatments — SA, FIRE, iterated):
+   all rejected, but with the buggy Tersoff.
+5. **Phase E** (LAMMPS cross-check): found the operator-precedence
+   bug in `potential.py`; fixed it.
+6. **Phase F** (Phase D rerun + new HPO): all post-hoc treatments
+   *still* fail at ρ=1.5, but `glass_unified_v3_ood` finds a
+   significantly better default set. Promoted.
 
 Diagnostic plots (each lives under its experiment's local results dir):
 - `research/density_extrapolation/experiments/phase_a/results/phase_a_pareto.png` —

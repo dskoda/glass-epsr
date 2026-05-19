@@ -175,7 +175,13 @@ class TorchTersoff:
         g_theta = self._gijk(costheta, p)                 # (N, a, b)
 
         delta_r = r_a - r_b                               # (N, a, b)
-        arg = p.lambda3 * delta_r ** p.m
+        # Tersoff 1988 / ASE 3.25 / LAMMPS form: arg = (lambda3 * delta_r)^m.
+        # Earlier versions of this file wrote `lambda3 * delta_r**p.m`, which
+        # is `lambda3 · delta_r^m` and is missing a factor of lambda3^(m-1).
+        # The bug is invisible in diamond Si (delta_r=0 for every triple),
+        # but it grows with density in amorphous Si because more neighbour
+        # pairs have nonzero delta_r in the cutoff fringe.
+        arg = (p.lambda3 * delta_r) ** p.m
         ex_delr = self._safe_exp(arg)                     # (N, a, b)
 
         triple_term = fc_ik * g_theta * ex_delr           # (N, a, b)
@@ -359,11 +365,16 @@ class TorchTersoff:
             fcik = self._fc(abs_rik, p.R, p.D)
             dfcik = self._fc_d(abs_rik, p.R, p.D)
 
-            # Matches installed ase.calculators.tersoff: arg = lambda3 * (r_ij - r_ik)^m
-            arg = p.lambda3 * (abs_rij - abs_rik) ** p.m
+            # Tersoff 1988 / ASE 3.25 / LAMMPS form: arg = (lambda3 * delta_r)^m.
+            # See _energy_from_pairs above for the bug history.
+            arg = (p.lambda3 * (abs_rij - abs_rik)) ** p.m
             ex_delr = self._safe_exp(arg)
+            # d(arg)/d(r_ij) = m · lambda3^m · delta_r^(m-1)
             ex_delr_d = (
-                p.m * p.lambda3 * (abs_rij - abs_rik) ** (p.m - 1) * ex_delr
+                p.m
+                * p.lambda3 ** p.m
+                * (abs_rij - abs_rik) ** (p.m - 1)
+                * ex_delr
             )
 
             costheta = rij_hat @ rik_hat

@@ -21,6 +21,7 @@ def glass():
 from glass.cli.train import train
 from glass.cli.generate import generate
 from glass.cli.initialize import initialize
+from glass.cli.refine import refine
 from glass.cli.analysis import (
     plot_loss,
     write_spec_feature,
@@ -31,6 +32,7 @@ from glass.cli.metrics import metrics, compute_pdf_command, compute_coordination
 
 glass.add_command(train)
 glass.add_command(generate)
+glass.add_command(refine)
 glass.add_command(plot_loss)
 glass.add_command(initialize)
 glass.add_command(write_spec_feature)
