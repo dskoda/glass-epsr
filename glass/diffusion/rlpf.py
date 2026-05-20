@@ -90,6 +90,7 @@ class RLPFTrainer:
         diffuser,
         reward_fn,
         cfg: RLPFConfig = None,
+        likelihood_fn=None,
     ) -> None:
         if cfg is None:
             cfg = RLPFConfig()
@@ -97,6 +98,10 @@ class RLPFTrainer:
         self.diffuser = diffuser
         self.reward_fn = reward_fn
         self.cfg = cfg
+        # Optional PDF guidance applied during rollout collection (Phase H-B).
+        # If set, each SDE step adds the likelihood gradient to the prior score,
+        # steering trajectories toward the target structure during data collection.
+        self.likelihood_fn = likelihood_fn
 
         # Frozen reference policy: deep copy of EMA model weights.
         # AveragedModel stores parameters averaged under the EMA scheme;
@@ -224,6 +229,10 @@ class RLPFTrainer:
                 t_scalar = t_val.reshape(1)
 
                 score = self._score_ema(species, pos, cell, t_scalar, cutoff)
+
+                if self.likelihood_fn is not None:
+                    l_score, _ = self.likelihood_fn(species, pos, cell, t_scalar, cutoff)
+                    score = score + l_score
 
                 g2_t = float(g2(t_val))
                 g_t = float(g(t_val))

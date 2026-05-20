@@ -410,3 +410,54 @@ def test_subsample_steps_reduces_transitions():
     # With T-1=7 steps: subsample_steps=1 → 7, subsample_steps=2 → 4
     assert n1 == 7, f"Expected 7 transitions with subsample_steps=1, got {n1}"
     assert n2 == 4, f"Expected 4 transitions with subsample_steps=2, got {n2}"
+
+
+# ---------------------------------------------------------------------------
+# Test 9: likelihood_fn during rollouts shifts mu_old
+# ---------------------------------------------------------------------------
+
+
+def test_likelihood_fn_shifts_mu_old():
+    """collect_rollouts with a non-zero likelihood_fn produces different mu_old values."""
+    from glass.diffusion.rlpf import RLPFConfig, RLPFTrainer
+
+    atoms = _make_si_bulk_4()
+    species, pos, cell = _atoms_to_tensors(atoms)
+    diffuser = _make_diffuser()
+    ts = _make_ts(n_steps=8)
+
+    sigma0 = diffuser.sigma(ts[0])
+    torch.manual_seed(0)
+    pos_noisy = pos + float(sigma0) * torch.randn_like(pos)
+
+    # Stub likelihood_fn: returns a constant nonzero score correction.
+    class _ConstantLikelihood:
+        def __call__(self, species, pos, cell, t, cutoff):
+            correction = torch.full_like(pos, 0.1)
+            norm = torch.tensor(0.1)
+            return correction, norm
+
+    score_net = _make_score_net()
+    tersoff_calc = _make_tersoff_calc()
+    reward_fn = _make_reward_fn(tersoff_calc)
+    cfg = RLPFConfig(subsample_steps=1, n_rollouts_per_update=1, ppo_epochs=1)
+
+    trainer_plain = RLPFTrainer(score_net, diffuser, reward_fn, cfg)
+    trainer_guided = RLPFTrainer(score_net, diffuser, reward_fn, cfg,
+                                 likelihood_fn=_ConstantLikelihood())
+
+    torch.manual_seed(7)
+    trajs_plain = trainer_plain.collect_rollouts(
+        species, pos_noisy.clone(), cell, cutoff=5.0, ts=ts, n_rollouts=1
+    )
+    torch.manual_seed(7)
+    trajs_guided = trainer_guided.collect_rollouts(
+        species, pos_noisy.clone(), cell, cutoff=5.0, ts=ts, n_rollouts=1
+    )
+
+    # mu_old must differ between guided and unguided rollouts.
+    mu_plain = trajs_plain[0].transitions[0].mu_old
+    mu_guided = trajs_guided[0].transitions[0].mu_old
+    assert not torch.allclose(mu_plain, mu_guided, atol=1e-6), (
+        "likelihood_fn should shift mu_old in collect_rollouts."
+    )

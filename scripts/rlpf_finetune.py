@@ -151,6 +151,18 @@ import torch
     show_default=True,
     help="Checkpoint to load: 'best', 'last', or a specific filename.",
 )
+@click.option(
+    "--guidance-rho",
+    "guidance_rho",
+    type=float,
+    default=None,
+    show_default=True,
+    help=(
+        "PDF guidance strength during rollout collection (LikelihoodScore rho). "
+        "If not set, rollouts use only the score prior (Phase H-A behaviour). "
+        "Set to 737.0 to match the v3_ood HPO default."
+    ),
+)
 def main(
     experiment_path,
     density,
@@ -169,6 +181,7 @@ def main(
     subsample_steps,
     tstep,
     checkpoint,
+    guidance_rho,
 ):
     """Fine-tune a glass score model using RLPF."""
     import ase.io
@@ -209,6 +222,7 @@ def main(
         "subsample_steps": subsample_steps,
         "tstep": tstep,
         "checkpoint": checkpoint,
+        "guidance_rho": guidance_rho,
     }
     with open(out_path / "config.json", "w") as f:
         json.dump(cli_config, f, indent=2)
@@ -263,6 +277,43 @@ def main(
     )
 
     # ------------------------------------------------------------------
+    # Build PDF guidance for rollout collection (Phase H-B when guidance_rho set)
+    # ------------------------------------------------------------------
+    likelihood_fn = None
+    if guidance_rho is not None:
+        from glass.lit.modules.guidance import create_guidance_model
+        from glass.lit.modules.likelihood import LikelihoodScore
+
+        guidance_model = create_guidance_model(
+            guidance_type="pdf",
+            device=dev,
+            cutoff=config.cutoff,
+            bin_size=config.bin_size,
+        )
+
+        # Build target_y on the DifferentiableRDF bin grid.
+        bin_edges = np.linspace(0, config.cutoff, config.bin_size + 1)
+        x_grid = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        y_interp = np.interp(x_grid, target_r, target_g_r)
+        target_y = torch.from_numpy(y_interp).float().unsqueeze(0).to(dev)
+
+        likelihood_fn = LikelihoodScore(
+            score_net=score_net.ema_model,
+            guidance_model=guidance_model,
+            target_y=target_y,
+            rho=guidance_rho,
+            diffuser=diffuser,
+            guidance_type="pdf",
+            cutoff=config.cutoff,
+        )
+        print(
+            f"[RLPF] PDF guidance during rollouts: rho={guidance_rho}",
+            flush=True,
+        )
+    else:
+        print("[RLPF] No PDF guidance during rollouts (prior only).", flush=True)
+
+    # ------------------------------------------------------------------
     # Build RLPF trainer
     # ------------------------------------------------------------------
     rlpf_cfg = RLPFConfig(
@@ -272,7 +323,7 @@ def main(
         n_rollouts_per_update=n_rollouts,
         subsample_steps=subsample_steps,
     )
-    trainer = RLPFTrainer(score_net, diffuser, reward_fn, rlpf_cfg)
+    trainer = RLPFTrainer(score_net, diffuser, reward_fn, rlpf_cfg, likelihood_fn=likelihood_fn)
 
     # ------------------------------------------------------------------
     # Load initial structures
