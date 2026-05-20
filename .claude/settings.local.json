@@ -96,7 +96,13 @@
       "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/ -q --tb=short)",
       "Bash(KMP_DUPLICATE_LIB_OK=TRUE glass tersoff-stats tests/data/Si_2.5_00.xyz)",
       "Bash(KMP_DUPLICATE_LIB_OK=TRUE glass metrics tests/data/Si_2.5_00.xyz --include-tersoff --no-sq --no-voronoi --output /tmp/metrics_test.json)",
-      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest *)"
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest *)",
+      "Bash(bash research/density_extrapolation/experiments/phase_h_rlpf/run_phase_h_a.sh)",
+      "Bash(tee /tmp/phase_h_a.log)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(awk '{print $1, $2, $3, $4, $11, $12}')",
+      "Bash(awk '{print \"PID:\"$2, \"CPU:\"$3, \"MEM:\"$4, \"STAT:\"$8}')",
+      "Bash(ps -o pid,stat,wchan -p 3835832 -p 3835836 -p 3835838)"
     ]
   }
 }
