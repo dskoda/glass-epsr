@@ -88,7 +88,9 @@ def denoise_by_sde(
         if tersoff_guidance is not None:
             lam = float(tersoff_schedule(t))
             if lam != 0.0:
-                guidance_vec = tersoff_guidance(pos.detach(), cell, species)
+                sigma_t = diffuser.sigma(t)
+                pos_hat0 = (pos + sigma_t ** 2 * p_score).detach()
+                guidance_vec = tersoff_guidance(pos_hat0, cell, species)
                 t_score = lam * guidance_vec
                 p_score = p_score + t_score
 
@@ -136,8 +138,10 @@ def denoise_by_sde(
                     ):
                         lam_c = float(tersoff_schedule(t))
                         if lam_c != 0.0:
+                            sigma_t_c = diffuser.sigma(t)
+                            pos_hat0_c = (pos + sigma_t_c ** 2 * c_score).detach()
                             c_score = c_score + lam_c * tersoff_guidance(
-                                pos.detach(), cell, species
+                                pos_hat0c, cell, species
                             )
                     pos = (
                         pos
