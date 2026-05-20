@@ -157,7 +157,8 @@ def energy(input_path: Path, device: str):
     atoms.calc = silicon_calculator(device=device)
     E = atoms.get_potential_energy()
     F = atoms.get_forces()
-    click.echo(f"E = {E:.8f} eV")
+    E = E / len(atoms)
+    click.echo(f"E = {E:.8f} eV/atom")
     click.echo(f"max |F| = {abs(F).max():.6e} eV/A")
 
 

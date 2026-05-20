@@ -257,11 +257,10 @@ def metrics(
                 )
                 ring_counts = metrics_obj.rings.ring_counts
                 if metrics_obj.rings.total_rings > 0:
-                    top_indices = np.argsort(ring_counts)[-3:][::-1]
                     top_rings = [
-                        f"{int(i)}-member: {int(ring_counts[i])}"
-                        for i in top_indices
-                        if ring_counts[i] > 0
+                        f"{int(i)}-member: {int(cnt)}"
+                        for i, cnt in enumerate(ring_counts)
+                        if i > 2
                     ]
                     if top_rings:
                         click.echo(f"    Top: {', '.join(top_rings)}")
@@ -392,6 +391,10 @@ def compute_coordination_command(structure: str, cutoff: Optional[float], output
     click.echo(
         f"Mean CN: {coord_metrics.mean_coordination:.2f} ± {coord_metrics.std_coordination:.2f}"
     )
+    for i, n in enumerate(coord_metrics.coordination_histogram):
+        click.echo(
+            f"{i:02d}: {n:d}"
+        )
 
 
 @click.command("rings", help="Compute ring statistics.")
@@ -434,13 +437,13 @@ def compute_rings_command(
     click.echo(f"Total rings: {rings_metrics.total_rings}")
     if rings_metrics.total_rings > 0:
         ring_counts = rings_metrics.ring_counts
-        top_indices = np.argsort(ring_counts)[-5:][::-1]
-        for idx in top_indices:
-            if ring_counts[idx] > 0:
-                frac = rings_metrics.ring_fractions[idx]
-                click.echo(
-                    f"  {int(idx)}-member: {int(ring_counts[idx])} ({frac:.1f}%)"
-                )
+        for idx, cnt in enumerate(ring_counts):
+            if idx < 3:
+                continue
+            frac = rings_metrics.ring_fractions[idx]
+            click.echo(
+                f"  {int(idx)}-member: {int(cnt)} ({frac:.1f}%)"
+            )
 
 
 @click.command(
