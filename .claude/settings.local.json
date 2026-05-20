@@ -81,7 +81,17 @@
       "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_rings.py -v)",
       "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_rings.py::TestRingPerformance::test_compute_rings_scaling -v)",
       "Bash(git stash *)",
-      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_metrics.py)"
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_metrics.py)",
+      "Bash(mkdir -p /tmp/analyze_smoke/generated/cond/density_2.5/no_tersoff)",
+      "Bash(cp -r /home/dskoda/prj/glass-epsr/research/density_extrapolation/results/generated/cond/density_2.5/no_tersoff/init_Si_2.5_4 /tmp/analyze_smoke/generated/cond/density_2.5/no_tersoff/)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE glass metrics data/Si_1.5_2.5_3.5/Si_1.5_*.xyz --output research/density_extrapolation/results/reference_pdfs/reference_1.5_metrics.json --pdf-cutoff 8.0 --auto-cutoff --include-rings --rings-maxlength 10 --indent 2)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE glass metrics data/Si_1.5_2.5_3.5/Si_2.5_*.xyz --output research/density_extrapolation/results/reference_pdfs/reference_2.5_metrics.json --pdf-cutoff 8.0 --auto-cutoff --include-rings --rings-maxlength 10 --indent 2)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE glass metrics data/Si_1.5_2.5_3.5/Si_3.5_*.xyz --output research/density_extrapolation/results/reference_pdfs/reference_3.5_metrics.json --pdf-cutoff 8.0 --auto-cutoff --include-rings --rings-maxlength 10 --indent 2)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_sampling_corrector.py tests/test_tersoff.py -v -x)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_sampling_corrector.py -v -x)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/ -v -x -q)",
+      "Bash(bash research/density_extrapolation/experiments/phase_g_tweedie/run_matrix.sh)",
+      "Bash(tee /tmp/phase_g_run.log)"
     ]
   }
 }

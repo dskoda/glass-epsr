@@ -26,6 +26,7 @@ def denoise_by_sde(
     corr_use_tersoff: bool = True,
     corr_t_gate: float = 0.6,
     anneal_fn: Optional[Callable] = None,
+    tersoff_tweedie: bool = True,
 ) -> Tuple[Optional[List[Tensor]], Tensor]:
     """Run reverse SDE to denoise atomic positions.
 
@@ -57,6 +58,12 @@ def denoise_by_sde(
             of the trajectory, to avoid blow-ups at high noise.
         anneal_fn: Optional callable (pos, cell, species) -> pos, run once
             after the main reverse-SDE loop for post-relaxation.
+        tersoff_tweedie: If True (default), evaluate Tersoff on the Tweedie
+            denoised estimate x̂₀ = x_t + σ²·score rather than on the noisy
+            x_t directly. The Tweedie estimate is a cleaner proxy for the
+            clean structure, so the potential energy surface is less distorted
+            by diffusion noise. Set to False to recover the legacy behaviour
+            (evaluate Tersoff on noisy positions).
 
     Returns:
         (traj, final_pos) where traj is None if save_traj is False,
@@ -88,9 +95,12 @@ def denoise_by_sde(
         if tersoff_guidance is not None:
             lam = float(tersoff_schedule(t))
             if lam != 0.0:
-                sigma_t = diffuser.sigma(t)
-                pos_hat0 = (pos + sigma_t ** 2 * p_score).detach()
-                guidance_vec = tersoff_guidance(pos_hat0, cell, species)
+                if tersoff_tweedie:
+                    sigma_t = diffuser.sigma(t)
+                    tersoff_pos = (pos + sigma_t ** 2 * p_score).detach()
+                else:
+                    tersoff_pos = pos
+                guidance_vec = tersoff_guidance(tersoff_pos, cell, species)
                 t_score = lam * guidance_vec
                 p_score = p_score + t_score
 
@@ -138,10 +148,13 @@ def denoise_by_sde(
                     ):
                         lam_c = float(tersoff_schedule(t))
                         if lam_c != 0.0:
-                            sigma_t_c = diffuser.sigma(t)
-                            pos_hat0_c = (pos + sigma_t_c ** 2 * c_score).detach()
+                            if tersoff_tweedie:
+                                sigma_t_c = diffuser.sigma(t)
+                                tersoff_pos_c = (pos + sigma_t_c ** 2 * c_score).detach()
+                            else:
+                                tersoff_pos_c = pos
                             c_score = c_score + lam_c * tersoff_guidance(
-                                pos_hat0c, cell, species
+                                tersoff_pos_c, cell, species
                             )
                     pos = (
                         pos

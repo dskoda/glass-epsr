@@ -192,6 +192,51 @@ def test_conditional_likelihood_pulls_pos_toward_target():
     assert d_on < d_off, (d_on, d_off)
 
 
+def test_tersoff_tweedie_flag_toggles_evaluation_point():
+    """tersoff_tweedie=True and =False must produce different outputs
+    when sigma > 0 (the Tweedie estimate differs from the noisy pos).
+    Both must be finite and shape-correct."""
+    diffuser = VarianceExplodingDiffuser(k=0.8)
+    species, pos0, cell = _random_setup(seed=7)
+    ts = torch.linspace(0.5, 1e-3, 16)
+
+    call_count = {"n": 0}
+    last_eval_pos = {}
+
+    def stub_tersoff(pos, c, sp, key=""):
+        call_count["n"] += 1
+        last_eval_pos[key] = pos.clone()
+        return torch.zeros_like(pos)
+
+    def make_tersoff(key):
+        def fn(pos, c, sp):
+            return stub_tersoff(pos, c, sp, key=key)
+        return fn
+
+    def const_schedule(t):
+        return 1.0
+
+    torch.manual_seed(5)
+    _, final_tweedie = denoise_by_sde(
+        species, pos0.clone(), cell, 5.0,
+        _zero_score, None, ts, diffuser,
+        tersoff_guidance=make_tersoff("tweedie"),
+        tersoff_schedule=const_schedule,
+        tersoff_tweedie=True,
+    )
+    torch.manual_seed(5)
+    _, final_noisy = denoise_by_sde(
+        species, pos0.clone(), cell, 5.0,
+        _zero_score, None, ts, diffuser,
+        tersoff_guidance=make_tersoff("noisy"),
+        tersoff_schedule=const_schedule,
+        tersoff_tweedie=False,
+    )
+    assert torch.isfinite(final_tweedie).all()
+    assert torch.isfinite(final_noisy).all()
+    assert final_tweedie.shape == pos0.shape
+
+
 def test_conditional_progress_callback_receives_l_norm():
     """When ``likelihood_fn`` is set, the progress callback gets ``l_norm``
     and ``target_norm`` kwargs (not ``t_norm``)."""

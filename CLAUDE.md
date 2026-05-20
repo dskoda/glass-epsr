@@ -396,6 +396,7 @@ When promoting a new best to defaults:
 - PDF/ADF: RMSE, MAE, area between curves, cosine similarity, R-chi².
 - Coordination: EMD (Wasserstein), histogram RMSE, mean/std error.
 - Peak: position error, height error.
+- Rings: ring size distributions, RMSE, and other distribution metrics
 
 ### Tersoff Potential Notes
 

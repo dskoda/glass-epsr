@@ -245,6 +245,12 @@ GUIDANCE TYPES:
     default=None,
     help="[tersoff] Per-atom guidance-norm clamp (Å units of autograd/N).",
 )
+@click.option(
+    "--tersoff-tweedie/--no-tersoff-tweedie",
+    default=None,
+    help="[tersoff] Evaluate Tersoff on the Tweedie denoised estimate x̂₀ = x_t + σ²·score "
+         "rather than on the noisy x_t. Default: True.",
+)
 # Langevin predictor-corrector
 @click.option(
     "--n-corr",
@@ -338,6 +344,7 @@ def generate(
     tersoff_schedule,
     tersoff_t_gate,
     tersoff_clamp,
+    tersoff_tweedie,
     n_corr,
     corr_step_size,
     corr_use_tersoff,
@@ -398,6 +405,9 @@ def generate(
     )
     tersoff_clamp = (
         tersoff_clamp if tersoff_clamp is not None else config.tersoff_clamp
+    )
+    tersoff_tweedie = (
+        tersoff_tweedie if tersoff_tweedie is not None else getattr(config, "tersoff_tweedie", True)
     )
     # Sampler refinements
     n_corr = n_corr if n_corr is not None else config.n_corr
@@ -642,6 +652,7 @@ def generate(
             "tersoff_schedule": tersoff_schedule if tersoff_guidance else None,
             "tersoff_t_gate": tersoff_t_gate if tersoff_guidance else None,
             "tersoff_clamp": tersoff_clamp if tersoff_guidance else None,
+            "tersoff_tweedie": tersoff_tweedie if tersoff_guidance else None,
             "n_corr": n_corr,
             "corr_step_size": corr_step_size if n_corr else None,
             "corr_use_tersoff": corr_use_tersoff if n_corr else None,
@@ -681,6 +692,7 @@ def generate(
                 progress_fn=progress_callback if guidance_type else None,
                 tersoff_guidance=tersoff_guidance_fn,
                 tersoff_schedule=tersoff_schedule_fn,
+                tersoff_tweedie=tersoff_tweedie,
                 n_corr=n_corr,
                 corr_step_size=corr_step_size,
                 corr_use_tersoff=corr_use_tersoff,
