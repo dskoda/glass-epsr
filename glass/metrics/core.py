@@ -239,7 +239,8 @@ class StructuralMetrics:
     structure_factor: Optional['StructureFactorMetrics'] = None
     voronoi: Optional['VoronoiMetrics'] = None
     rings: Optional['RingMetrics'] = None
-    
+    tersoff: Optional['TersoffMetrics'] = None
+
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization."""
         from pathlib import Path
@@ -262,6 +263,8 @@ class StructuralMetrics:
             result["voronoi"] = self.voronoi.to_dict()
         if self.rings is not None:
             result["rings"] = self.rings.to_dict()
+        if self.tersoff is not None:
+            result["tersoff"] = self.tersoff.to_dict()
         return result
     
     def to_json(self, filepath: Union[str, Path], indent: int = 2) -> None:

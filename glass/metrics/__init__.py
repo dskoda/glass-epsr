@@ -35,6 +35,17 @@ from glass.metrics.rings import (
     compute_rings_distribution,
 )
 
+# Tersoff energy/force metrics
+from glass.metrics.tersoff import (
+    TersoffMetrics,
+    compute_tersoff_metrics,
+    tersoff_energy_error,
+    tersoff_forces_rms_error,
+    tersoff_forces_max_error,
+    tersoff_forces_histogram_rmse,
+    tersoff_forces_emd,
+)
+
 # Advanced metrics (structure factor, Voronoi)
 from glass.metrics.advanced import (
     compute_structure_factor,
@@ -84,11 +95,13 @@ def compute_all_metrics(
     include_voronoi: bool = True,
     include_rings: bool = False,
     rings_maxlength: int = 10,
+    include_tersoff: bool = False,
+    tersoff_device: str = "cpu",
 ) -> StructuralMetrics:
     """Compute all structural metrics for ASE Atoms.
-    
+
     This is the main entry point for computing comprehensive structural metrics.
-    
+
     Args:
         atoms: ASE Atoms object
         pdf_cutoff: Maximum r for PDF computation
@@ -100,7 +113,9 @@ def compute_all_metrics(
         include_voronoi: Whether to compute Voronoi analysis
         include_rings: Whether to compute ring statistics
         rings_maxlength: Maximum ring size to consider (if include_rings=True)
-    
+        include_tersoff: Whether to compute Tersoff energy and force statistics
+        tersoff_device: Torch device for Tersoff computation ('cpu' or 'cuda')
+
     Returns:
         StructuralMetrics object with all computed metrics
     """
@@ -150,7 +165,11 @@ def compute_all_metrics(
         rings_metrics = compute_rings(
             atoms, cutoff=coord_cutoff, maxlength=rings_maxlength, auto_cutoff=False
         )
-    
+
+    tersoff_m = None
+    if include_tersoff:
+        tersoff_m = compute_tersoff_metrics(atoms, device=tersoff_device)
+
     return StructuralMetrics(
         n_atoms=n_atoms,
         composition=composition,
@@ -163,6 +182,7 @@ def compute_all_metrics(
         structure_factor=sq_metrics,
         voronoi=voronoi_metrics,
         rings=rings_metrics,
+        tersoff=tersoff_m,
     )
 
 
@@ -202,6 +222,14 @@ __all__ = [
     'coordination_std_error',
     'compute_all_errors',
     'compute_weighted_error',
+    # Tersoff energy/force metrics
+    'TersoffMetrics',
+    'compute_tersoff_metrics',
+    'tersoff_energy_error',
+    'tersoff_forces_rms_error',
+    'tersoff_forces_max_error',
+    'tersoff_forces_histogram_rmse',
+    'tersoff_forces_emd',
     # Utilities
     'load_metrics_from_json',
 ]

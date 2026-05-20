@@ -139,6 +139,19 @@ OUTPUT FORMAT:
     help="Maximum ring size to consider.",
 )
 @click.option(
+    "--include-tersoff/--no-tersoff",
+    "include_tersoff",
+    default=False,
+    help="Compute Tersoff energy and force distribution metrics (Si only).",
+)
+@click.option(
+    "--tersoff-device",
+    type=str,
+    default="cpu",
+    show_default=True,
+    help="Torch device for Tersoff computation ('cpu' or 'cuda').",
+)
+@click.option(
     "--indent",
     type=int,
     default=2,
@@ -165,6 +178,8 @@ def metrics(
     include_voronoi: bool,
     include_rings: bool,
     rings_maxlength: int,
+    include_tersoff: bool,
+    tersoff_device: str,
     indent: int,
     output_format: str,
 ):
@@ -192,6 +207,8 @@ def metrics(
                 include_voronoi=include_voronoi,
                 include_rings=include_rings,
                 rings_maxlength=rings_maxlength,
+                include_tersoff=include_tersoff,
+                tersoff_device=tersoff_device,
             )
 
             # Store results
@@ -238,7 +255,6 @@ def metrics(
                 click.echo(
                     f"  Rings: {metrics_obj.rings.total_rings} found (maxlength={metrics_obj.rings.maxlength})"
                 )
-                # Show top ring sizes
                 ring_counts = metrics_obj.rings.ring_counts
                 if metrics_obj.rings.total_rings > 0:
                     top_indices = np.argsort(ring_counts)[-3:][::-1]
@@ -249,6 +265,13 @@ def metrics(
                     ]
                     if top_rings:
                         click.echo(f"    Top: {', '.join(top_rings)}")
+
+            if include_tersoff and metrics_obj.tersoff:
+                t = metrics_obj.tersoff
+                click.echo(
+                    f"  Tersoff E/atom: {t.energy_per_atom:.4f} eV/atom  "
+                    f"F_rms: {t.forces_rms:.4f} eV/Å  F_max: {t.forces_max:.4f} eV/Å"
+                )
 
             click.echo()
 
@@ -271,6 +294,8 @@ def metrics(
                     "include_voronoi": include_voronoi,
                     "include_rings": include_rings,
                     "rings_maxlength": rings_maxlength,
+                    "include_tersoff": include_tersoff,
+                    "tersoff_device": tersoff_device,
                 },
             },
             "structures": results,

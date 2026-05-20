@@ -516,7 +516,22 @@ def compute_all_errors(
         errors['rings_cosine'] = rings_cosine_similarity(ref.rings, target.rings)
         errors['rings_emd'] = rings_emd(ref.rings, target.rings)
         errors['rings_total_error'] = rings_total_error(ref.rings, target.rings)
-    
+
+    # Tersoff energy/force errors (if available)
+    if ref.tersoff is not None and target.tersoff is not None:
+        from glass.metrics.tersoff import (
+            tersoff_energy_error,
+            tersoff_forces_rms_error,
+            tersoff_forces_max_error,
+            tersoff_forces_histogram_rmse,
+            tersoff_forces_emd,
+        )
+        errors['tersoff_energy_error'] = tersoff_energy_error(ref.tersoff, target.tersoff)
+        errors['tersoff_forces_rms_error'] = tersoff_forces_rms_error(ref.tersoff, target.tersoff)
+        errors['tersoff_forces_max_error'] = tersoff_forces_max_error(ref.tersoff, target.tersoff)
+        errors['tersoff_forces_histogram_rmse'] = tersoff_forces_histogram_rmse(ref.tersoff, target.tersoff)
+        errors['tersoff_forces_emd'] = tersoff_forces_emd(ref.tersoff, target.tersoff)
+
     return errors
 
 

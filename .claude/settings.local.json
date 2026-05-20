@@ -91,7 +91,12 @@
       "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_sampling_corrector.py -v -x)",
       "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/ -v -x -q)",
       "Bash(bash research/density_extrapolation/experiments/phase_g_tweedie/run_matrix.sh)",
-      "Bash(tee /tmp/phase_g_run.log)"
+      "Bash(tee /tmp/phase_g_run.log)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/test_tersoff_metrics.py -v)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest tests/ -q --tb=short)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE glass tersoff-stats tests/data/Si_2.5_00.xyz)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE glass metrics tests/data/Si_2.5_00.xyz --include-tersoff --no-sq --no-voronoi --output /tmp/metrics_test.json)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE pytest *)"
     ]
   }
 }

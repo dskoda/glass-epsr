@@ -29,6 +29,7 @@ from glass.cli.analysis import (
     build_ref_stats,
 )
 from glass.cli.metrics import metrics, compute_pdf_command, compute_coordination_command, compute_rings_command, compare_command
+from glass.cli.tersoff_stats import tersoff_stats
 
 glass.add_command(train)
 glass.add_command(generate)
@@ -43,6 +44,7 @@ glass.add_command(compute_pdf_command, name="pdf")
 glass.add_command(compute_coordination_command, name="coordination")
 glass.add_command(compute_rings_command, name="rings")
 glass.add_command(compare_command, name="compare")
+glass.add_command(tersoff_stats, name="tersoff-stats")
 
 # Register Tersoff potential subcommands (md, energy) under the `glass` group.
 from glass.potentials.tersoff.cli import md as _tersoff_md
