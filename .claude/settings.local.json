@@ -108,7 +108,14 @@
       "Bash(echo \"Launched PID=$!\")",
       "Bash(ps -o pid,stat,etime,rss,cmd -p 4147700)",
       "Bash(ps -o pid,stat,etime -p 4147700)",
-      "Bash(tee research/density_extrapolation/experiments/phase_h_rlpf/results_b/consolidate.log)"
+      "Bash(tee research/density_extrapolation/experiments/phase_h_rlpf/results_b/consolidate.log)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE nohup python scripts/hpo_phys_v5.py research/density_extrapolation/experiment/ --ref-dir research/density_extrapolation/results/generated/cond/density_1.5/reference --init-dir research/density_extrapolation/experiment/inits --init-glob init_Si_1.5_*.xyz --n-trials 200 --n-seeds 1 --n-inits 5 --n-jobs 4 --devices cuda:0,cuda:1,cuda:2,cuda:3 --study-name glass_phys_v5_15ood --storage research/hpo/glass_phys_v5_15ood.db)",
+      "Bash(echo \"PID=$!\")",
+      "Bash(ps -p 2279077 -o pid,stat,etime)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE nohup python scripts/hpo_phys_v5.py research/density_extrapolation/experiment/ --ref-dir research/density_extrapolation/results/generated/cond/density_1.5/reference --init-dir research/density_extrapolation/experiment/inits --init-glob init_Si_1.5_*.xyz --n-trials 1000 --n-seeds 1 --n-inits 5 --n-jobs 4 --devices cuda:0,cuda:1,cuda:2,cuda:3 --study-name glass_phys_v5_15ood --storage research/hpo/glass_phys_v5_15ood.db)",
+      "Bash(ps -p 910444 -o pid,stat,etime)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE nohup python scripts/hpo_phys_v6.py research/density_extrapolation/experiment/ --ref-dir research/density_extrapolation/results/generated/cond/density_1.5/reference --init-dir research/density_extrapolation/experiment/inits --init-glob init_Si_1.5_*.xyz --n-trials 100 --n-seeds 1 --n-inits 5 --n-jobs 4 --devices cuda:0,cuda:1,cuda:2,cuda:3 --study-name glass_phys_v6_restart --storage research/hpo/glass_phys_v6_restart.db)",
+      "Bash(ps -p 3453072 -o pid,stat,etime)"
     ]
   }
 }
