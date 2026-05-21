@@ -51,30 +51,29 @@ class ExperimentConfig:
     save_top_k: int = 3
     
     # Generation parameters (for inference).
-    # Defaults come from the multi-density HPO ``glass_unified_v3_ood``
-    # (2026-05-18, scripts/hpo_unified.py), run AFTER the Phase E Tersoff
-    # implementation bug was fixed. Top-5 consensus across 200 trials.
-    # Best trial replay (5 inits × 5 seeds × 3 densities):
-    #   cond pdf_rmse=0.028, coord_emd=0.173, adf_rmse=0.060
-    # The PDF is 33 % better than v2_ood (0.042) at ρ=1.5/3.5; coord is
-    # essentially unchanged.
+    # Defaults come from the restart-capable HPO ``glass_phys_v6_restart``
+    # (2026-05-21, scripts/hpo_phys_v6.py), 100-trial study, cond-only,
+    # ρ=1.5 (hardest OOD case). Best trial (#39, n_restart=3) at 5 inits × 1 seed:
+    #   cond pdf_rmse=0.086, coord_emd=0.443, undercoord_le3=8.6%,
+    #   undercoord_le2=0.46%, tersoff_energy_error=0.083
+    # vs v5 (glass_phys_v5_15ood, 1200 trials):
+    #   cond pdf_rmse=0.131, coord_emd=0.522, undercoord_le3=9.9%
+    # Key changes vs v5:
+    #   tmax 0.595 → 0.938; tersoff_lambda 0.281 → 0.30 (user-set);
+    #   tersoff_t_gate 0.276 → 0.490; n_restart 1 → 3
+    # All other params fixed at v5-best values.
     checkpoint: str = "best"  # "best", "last", or specific filename
     n_runs: int = 10
-    tmin: float = 4e-4
-    tmax: float = 0.834
-    tstep: int = 512
+    tmin: float = 9.267e-3
+    tmax: float = 0.938
+    tstep: int = 256
     save_traj: bool = False
     device: str = "cuda:0"
 
     # Guidance parameters (for conditional generation).
-    # v3_ood: with the Tersoff fix in place, the optimizer converges on
-    # rho ≈ 600-1100 (median 737) — ~3× higher than v2_ood's 240. The fix
-    # made Tersoff produce ~3-180 meV/atom corrections that the prior had
-    # been silently absorbing; with that absorbed, the likelihood term can
-    # safely run hotter. At in-distribution (ρ=2.5) cond pdf=0.012, in
-    # line with v1's 0.013.
+    # rho=416 carried over from v5 (fixed in v6 search).
     guidance_type: Optional[str] = None  # "pdf", "adf", "xrd", "nd", "exafs", "xanes"
-    rho: float = 737.0
+    rho: float = 416.0
     ref_path: Optional[str] = None
     exp_data: Optional[str] = None
     spec_model_path: Optional[str] = None
@@ -90,38 +89,33 @@ class ExperimentConfig:
     qstep: float = 0.1  # XRD/ND
     biso: float = 1.5  # XRD/ND
 
-    # Tersoff-guidance defaults (v3_ood top-5 consensus).
-    # tersoff_lambda 0.20 → 0.23 (slight increase). Schedule converges on
-    # sigmoid (mode 2/5 in top-5; linear is competitive). t_gate dropped
-    # from 0.45 to 0.15 — Tersoff now activates earlier in the trajectory
-    # rather than late. With the fixed potential the angular term carries
-    # more weight, so it makes sense to apply it during structural
-    # decisions rather than just at low noise.
+    # Tersoff-guidance defaults (v6 best trial #39 + user override).
+    # tersoff_lambda set to 0.30 (user preference; HPO best was 0.128).
+    # t_gate 0.276 → 0.490: Tersoff active in mid-trajectory only.
+    # Schedule remains sigmoid.
     tersoff_guidance: bool = True
-    tersoff_lambda: float = 0.23
+    tersoff_lambda: float = 0.30
     tersoff_schedule: str = "sigmoid"
-    tersoff_t_gate: float = 0.15
+    tersoff_t_gate: float = 0.490
     tersoff_clamp: float = 10.0
 
-    # Sampler refinements (v3_ood top-5 consensus).
-    # n_corr 2 → 1 (top-5 was unanimous on n_corr=1). With the fixed
-    # Tersoff and stronger rho, the predictor step alone is well-behaved
-    # and the corrector's polishing role is no longer load-bearing.
-    # corr_step_size 0.12 → 0.30 (much larger; the corrector still runs
-    # but does fewer, larger steps). corr_t_gate 0.58 → 0.79 (corrector
-    # active over a wider t range, including high noise).
-    # t_schedule_rho 1.35 → 0.98 (back near 1.0 = uniform). The fixed
-    # Tersoff term makes the high-noise regime more informative, so
-    # concentrating steps near t=0 is no longer needed.
-    n_corr: int = 1
-    corr_step_size: float = 0.30
+    # Sampler refinements (v6 fixed params, carried from v5 best).
+    # n_corr=2, corr_step_size=0.44, corr_t_gate=0.464, t_schedule_rho=1.01
+    n_corr: int = 2
+    corr_step_size: float = 0.44
     corr_use_tersoff: bool = True
-    corr_t_gate: float = 0.79
-    t_schedule_rho: float = 0.98
+    corr_t_gate: float = 0.464
+    t_schedule_rho: float = 1.01
 
     # Simulated-annealing post-relaxation. The HPO study converged on
     # N_anneal=0 — the Langevin corrector already captures what SA would do,
     # so SA is disabled by default but the knobs remain tunable.
+    # Restart: number of full denoising passes per structure.
+    # n_restart=3 (default from glass_phys_v6_restart, 2026-05-21).
+    # Each pass starts from the previous output (same cell/species/guidance).
+    # SA tail runs only on the final pass.
+    n_restart: int = 3
+
     sa_n_steps: int = 0
     sa_T0: float = 1e-2
     sa_T_end: float = 1e-5

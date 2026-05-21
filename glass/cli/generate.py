@@ -313,6 +313,14 @@ GUIDANCE TYPES:
     default=None,
     help="[SA] Per-atom per-step displacement cap (Å).",
 )
+@click.option(
+    "--n-restart",
+    type=int,
+    default=None,
+    show_default=True,
+    help="Number of full denoising passes per structure. 1 = single pass (default). "
+         "Each restart starts from the previous pass output (same cell/species/guidance).",
+)
 def generate(
     experiment_path,
     inits,
@@ -355,6 +363,7 @@ def generate(
     sa_t_end,
     sa_lr,
     sa_lr_clamp,
+    n_restart,
 ):
     """Generate structures using trained score model."""
     import ase
@@ -424,6 +433,8 @@ def generate(
     sa_t_end = sa_t_end if sa_t_end is not None else config.sa_T_end
     sa_lr = sa_lr if sa_lr is not None else config.sa_lr
     sa_lr_clamp = sa_lr_clamp if sa_lr_clamp is not None else config.sa_lr_clamp
+    n_restart = n_restart if n_restart is not None else getattr(config, "n_restart", 1)
+    n_restart = max(1, int(n_restart))
     
     # Resolve output directory
     if outdir is None:
@@ -664,6 +675,7 @@ def generate(
             "sa_lr_clamp": sa_lr_clamp if sa_n_steps else None,
             "checkpoint": str(ckpt_path),
             "n_runs": n_runs,
+            "n_restart": n_restart,
             "init_file": init_file,
             "sub_id": sub_id,
         }
@@ -679,26 +691,31 @@ def generate(
             species, pos, cell = atoms_to_device(copy.deepcopy(init_atoms), device)
             cell_np = cell.detach().cpu().numpy()
             
-            traj, final_pos = denoise_by_sde(
-                species=species,
-                pos=pos,
-                cell=cell,
-                cutoff=cutoff,
-                score_fn=prior_fn,
-                likelihood_fn=likelihood_fn,
-                ts=ts_torch,
-                diffuser=diffuser,
-                save_traj=save_traj,
-                progress_fn=progress_callback if guidance_type else None,
-                tersoff_guidance=tersoff_guidance_fn,
-                tersoff_schedule=tersoff_schedule_fn,
-                tersoff_tweedie=tersoff_tweedie,
-                n_corr=n_corr,
-                corr_step_size=corr_step_size,
-                corr_use_tersoff=corr_use_tersoff,
-                corr_t_gate=corr_t_gate,
-                anneal_fn=anneal_fn,
-            )
+            pos_current = pos
+            traj = None
+            for _restart in range(n_restart):
+                last_restart = (_restart == n_restart - 1)
+                traj, pos_current = denoise_by_sde(
+                    species=species,
+                    pos=pos_current,
+                    cell=cell,
+                    cutoff=cutoff,
+                    score_fn=prior_fn,
+                    likelihood_fn=likelihood_fn,
+                    ts=ts_torch,
+                    diffuser=diffuser,
+                    save_traj=save_traj and last_restart,
+                    progress_fn=progress_callback if (guidance_type and last_restart) else None,
+                    tersoff_guidance=tersoff_guidance_fn,
+                    tersoff_schedule=tersoff_schedule_fn,
+                    tersoff_tweedie=tersoff_tweedie,
+                    n_corr=n_corr,
+                    corr_step_size=corr_step_size,
+                    corr_use_tersoff=corr_use_tersoff,
+                    corr_t_gate=corr_t_gate,
+                    anneal_fn=anneal_fn if last_restart else None,
+                )
+            final_pos = pos_current
             
             if save_traj:
                 traj_list = []
