@@ -14,6 +14,7 @@ from glass.lit.modules.tersoff_guidance import (
     TersoffEnergyGuidance,
     TersoffSchedule,
 )
+from glass.descriptors import TorchACSF, EntropyGuidance, EntropySchedule
 from glass.diffusion.schedules import power_law_ts
 from glass.diffusion.annealing import make_anneal_fn
 from glass.utils.atoms_utils import (
@@ -313,6 +314,36 @@ GUIDANCE TYPES:
     default=None,
     help="[SA] Per-atom per-step displacement cap (Å).",
 )
+# Structural-entropy (ACSF variance) guidance
+@click.option(
+    "--entropy-guidance/--no-entropy-guidance",
+    default=None,
+    help="Add ACSF descriptor-variance gradient as an auxiliary score term.",
+)
+@click.option(
+    "--entropy-lambda",
+    type=float,
+    default=None,
+    help="[entropy] Weight lambda_0 for the entropy guidance schedule.",
+)
+@click.option(
+    "--entropy-schedule",
+    type=click.Choice(["constant", "linear", "sigmoid"]),
+    default=None,
+    help="[entropy] Shape of lambda(t).",
+)
+@click.option(
+    "--entropy-t-gate",
+    type=float,
+    default=None,
+    help="[entropy] Gate time fraction (active when t/tmax <= t_gate).",
+)
+@click.option(
+    "--entropy-r-cut",
+    type=float,
+    default=None,
+    help="[entropy] ACSF cutoff radius (Å).",
+)
 @click.option(
     "--n-restart",
     type=int,
@@ -363,6 +394,11 @@ def generate(
     sa_t_end,
     sa_lr,
     sa_lr_clamp,
+    entropy_guidance,
+    entropy_lambda,
+    entropy_schedule,
+    entropy_t_gate,
+    entropy_r_cut,
     n_restart,
 ):
     """Generate structures using trained score model."""
@@ -433,6 +469,24 @@ def generate(
     sa_t_end = sa_t_end if sa_t_end is not None else config.sa_T_end
     sa_lr = sa_lr if sa_lr is not None else config.sa_lr
     sa_lr_clamp = sa_lr_clamp if sa_lr_clamp is not None else config.sa_lr_clamp
+    # Entropy guidance
+    entropy_guidance = (
+        entropy_guidance if entropy_guidance is not None
+        else getattr(config, "entropy_guidance", False)
+    )
+    entropy_lambda = (
+        entropy_lambda if entropy_lambda is not None
+        else getattr(config, "entropy_lambda", 1.0)
+    )
+    entropy_schedule = entropy_schedule or getattr(config, "entropy_schedule", "constant")
+    entropy_t_gate = (
+        entropy_t_gate if entropy_t_gate is not None
+        else getattr(config, "entropy_t_gate", 1.0)
+    )
+    entropy_r_cut = (
+        entropy_r_cut if entropy_r_cut is not None
+        else getattr(config, "entropy_r_cut", 4.0)
+    )
     n_restart = n_restart if n_restart is not None else getattr(config, "n_restart", 1)
     n_restart = max(1, int(n_restart))
     
@@ -489,6 +543,24 @@ def generate(
             lambda_0=tersoff_lambda,
             tmax=tmax,
             t_gate=tersoff_t_gate,
+        )
+
+    entropy_guidance_fn = None
+    entropy_schedule_fn = None
+    if entropy_guidance:
+        click.echo(
+            f"Entropy guidance: schedule={entropy_schedule} "
+            f"lambda0={entropy_lambda} t_gate={entropy_t_gate} "
+            f"r_cut={entropy_r_cut}"
+        )
+        entropy_guidance_fn = EntropyGuidance(
+            acsf=TorchACSF.for_silicon(r_cut=entropy_r_cut),
+        )
+        entropy_schedule_fn = EntropySchedule(
+            schedule=entropy_schedule,
+            lambda_0=entropy_lambda,
+            tmax=tmax,
+            t_gate=entropy_t_gate,
         )
 
     # Simulated-annealing post-relaxation: SA always runs on the Tersoff PES,
@@ -640,6 +712,8 @@ def generate(
             extra_tag.append(f"rho{t_schedule_rho:g}")
         if sa_n_steps and sa_n_steps > 0:
             extra_tag.append(f"sa{sa_n_steps}lr{sa_lr:g}")
+        if entropy_guidance:
+            extra_tag.append(f"ent_{entropy_schedule}_lam{entropy_lambda:g}")
         if extra_tag:
             run_outdir = os.path.join(run_outdir, "_".join(extra_tag))
         os.makedirs(run_outdir, exist_ok=True)
@@ -676,6 +750,11 @@ def generate(
             "checkpoint": str(ckpt_path),
             "n_runs": n_runs,
             "n_restart": n_restart,
+            "entropy_guidance": bool(entropy_guidance),
+            "entropy_lambda": entropy_lambda if entropy_guidance else None,
+            "entropy_schedule": entropy_schedule if entropy_guidance else None,
+            "entropy_t_gate": entropy_t_gate if entropy_guidance else None,
+            "entropy_r_cut": entropy_r_cut if entropy_guidance else None,
             "init_file": init_file,
             "sub_id": sub_id,
         }
@@ -714,6 +793,8 @@ def generate(
                     corr_use_tersoff=corr_use_tersoff,
                     corr_t_gate=corr_t_gate,
                     anneal_fn=anneal_fn if last_restart else None,
+                    entropy_guidance=entropy_guidance_fn,
+                    entropy_schedule=entropy_schedule_fn,
                 )
             final_pos = pos_current
             

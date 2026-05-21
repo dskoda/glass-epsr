@@ -116,6 +116,14 @@ class ExperimentConfig:
     # SA tail runs only on the final pass.
     n_restart: int = 3
 
+    # Structural-entropy guidance (ACSF variance, Cliffe et al. 2017).
+    # Disabled by default; enable per-run via CLI for ablation studies.
+    entropy_guidance: bool = False
+    entropy_lambda: float = 1.0
+    entropy_schedule: str = "constant"
+    entropy_t_gate: float = 1.0
+    entropy_r_cut: float = 4.0
+
     sa_n_steps: int = 0
     sa_T0: float = 1e-2
     sa_T_end: float = 1e-5
