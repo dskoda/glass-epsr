@@ -1,0 +1,822 @@
+#!/usr/bin/env python3
+"""Physics-weighted HPO v5 — log-scale undercoord penalty.
+
+Forked from ``hpo_phys_v4.py``. The v4 objective drove Tersoff forces
+down 6× at ρ=1.5 but settled around ~10% under-coordinated atoms. v5
+makes the undercoord penalty log-scale so the gradient is steepest as
+the fraction approaches 0 (the goal). Rings and ADF are deprioritized.
+
+Per-structure objective::
+
+    obj = W_PDF·pdf_rmse
+        + W_COORD·coord_emd
+        + W_UC3·log10(1 + frac_le3 / EPS3)
+        + W_UC2·log10(1 + frac_le2 / EPS2)
+        + W_TERSOFF_E·tersoff_energy_error
+        + W_TERSOFF_F·tersoff_forces_rms_error
+        + W_RINGS·rings_emd
+        + W_ADF·adf_rmse
+
+The log term has gradient W/(EPS · ln 10) at frac=0, so reductions in
+the last percent of undercoord matter as much as the first percent of
+PDF rmse. The two-bucket form penalizes coord ≤ 2 (dangling bonds)
+substantially more aggressively than coord ≤ 3 (under-saturated).
+
+Reference penalty levels at v5 weights (W_UC3=18, W_UC2=24, EPS3=0.005,
+EPS2=0.001):
+
+    frac_le3   contrib3       frac_le2   contrib2
+    0.00       0.0            0.00       0.0
+    0.005      5.42           0.001      7.22
+    0.02       9.93           0.005      14.0
+    0.10      16.16           0.02      33.6
+    0.30      33.13           0.10      48.2
+
+Usage
+-----
+
+Quick smoke (single GPU, 4 trials)::
+
+    python scripts/hpo_phys_v5.py research/density_extrapolation/experiment/ \\
+        --ref-dir research/density_extrapolation/results/generated/cond/density_1.5/reference \\
+        --init-dir research/density_extrapolation/experiment/inits \\
+        --init-glob "init_Si_1.5_*.xyz" \\
+        --n-trials 4 --n-seeds 1 --n-inits 1 \\
+        --n-jobs 1 --devices cuda:0 \\
+        --study-name glass_phys_v5_smoke \\
+        --storage /tmp/glass_phys_v5_smoke.db
+
+Full run (4 GPUs, 200 trials, ~3 h)::
+
+    python scripts/hpo_phys_v5.py research/density_extrapolation/experiment/ \\
+        --ref-dir research/density_extrapolation/results/generated/cond/density_1.5/reference \\
+        --init-dir research/density_extrapolation/experiment/inits \\
+        --init-glob "init_Si_1.5_*.xyz" \\
+        --n-trials 200 --n-seeds 1 --n-inits 5 \\
+        --n-jobs 4 --devices cuda:0,cuda:1,cuda:2,cuda:3 \\
+        --study-name glass_phys_v5_15ood \\
+        --storage research/hpo/glass_phys_v5_15ood.db
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import glob
+import json
+import os
+import threading
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import numpy as np
+import torch
+from ase import Atoms
+from ase.io import read
+
+from glass.diffusion.annealing import make_anneal_fn
+from glass.diffusion.sampling import denoise_by_sde
+from glass.diffusion.schedules import power_law_ts
+from glass.experiment import Experiment
+from glass.lit.datamodules import StructureSpecDataModule
+from glass.lit.modules import LitScoreNet
+from glass.lit.modules.guidance import create_guidance_model
+from glass.lit.modules.likelihood import LikelihoodScore
+from glass.lit.modules.tersoff_guidance import (
+    TersoffEnergyGuidance,
+    TersoffSchedule,
+)
+from glass.metrics import compute_all_metrics
+from glass.metrics.errors import compute_all_errors
+from glass.utils.atoms_utils import (
+    atoms_to_device,
+    compute_prior_score,
+    compute_target_from_reference,
+)
+
+
+# --------------------------------------------------------------------------
+# Objective weights — physical-correctness emphasis with log-scale
+# under-coordination penalties. Goal is frac_le3 → 0 and frac_le2 → 0.
+# --------------------------------------------------------------------------
+
+import math
+
+W_PDF = 1.0
+W_COORD = 3.0
+W_UC3 = 18.0      # log-scale weight for fraction with coord ≤ 3
+W_UC2 = 24.0      # log-scale weight for fraction with coord ≤ 2 (dangling)
+EPS3 = 0.005      # 0.5 % saturates the W_UC3 lower-bound noise
+EPS2 = 0.001      # 0.1 % — coord-2 atoms are catastrophic, so steeper
+
+W_TERSOFF_E = 3.0
+W_TERSOFF_F = 2.0
+W_RINGS = 0.5
+W_ADF = 0.01
+
+
+def _uc_penalty(frac: float, weight: float, eps: float) -> float:
+    """log10(1 + frac/eps) · weight. Zero at frac=0, ~weight at frac=eps."""
+    return weight * math.log10(1.0 + max(float(frac), 0.0) / eps)
+
+
+def _phys_obj(errors: Dict[str, float]) -> float:
+    """Per-structure physical-correctness objective.
+
+    `errors` is the dict returned by ``compute_all_errors`` plus inline-
+    added ``undercoord_frac_le3`` and ``undercoord_frac_le2`` keys.
+    """
+    return (
+        W_PDF * float(errors["pdf_rmse"])
+        + W_COORD * float(errors["coordination_emd"])
+        + _uc_penalty(errors["undercoord_frac_le3"], W_UC3, EPS3)
+        + _uc_penalty(errors["undercoord_frac_le2"], W_UC2, EPS2)
+        + W_TERSOFF_E * float(errors["tersoff_energy_error"])
+        + W_TERSOFF_F * float(errors["tersoff_forces_rms_error"])
+        + W_RINGS * float(errors["rings_emd"])
+        + W_ADF * float(errors["adf_rmse"])
+    )
+
+
+# --------------------------------------------------------------------------
+# Per-device cache. Optuna n_jobs uses threads, so one process shares GPUs.
+# --------------------------------------------------------------------------
+
+class DeviceCtx:
+    __slots__ = (
+        "device", "score_net", "diffuser", "guidance_model",
+        "ref_atoms_by_id", "target_by_id", "init_atoms_by_id",
+        "ref_metrics_by_id", "cutoff",
+    )
+
+    def __init__(self, device, score_net, diffuser, guidance_model, cutoff):
+        self.device = device
+        self.score_net = score_net
+        self.diffuser = diffuser
+        self.guidance_model = guidance_model
+        self.cutoff = cutoff
+        # Filled on first trial that touches each (init, ref) pair.
+        self.ref_atoms_by_id: Dict[str, Atoms] = {}
+        self.init_atoms_by_id: Dict[str, Atoms] = {}
+        self.target_by_id: Dict[str, torch.Tensor] = {}
+        self.ref_metrics_by_id: Dict[str, object] = {}
+
+
+_device_cache: Dict[str, DeviceCtx] = {}
+_device_cache_lock = threading.Lock()
+_device_pool: List[str] = []
+_device_counter = {"i": 0}
+_device_counter_lock = threading.Lock()
+_thread_local = threading.local()
+
+
+def _acquire_device() -> str:
+    with _device_counter_lock:
+        dev = _device_pool[_device_counter["i"] % len(_device_pool)]
+        _device_counter["i"] += 1
+    return dev
+
+
+def _get_device_ctx(
+    experiment_path: str,
+    init_paths: List[Path],
+    ref_dir: Path,
+) -> DeviceCtx:
+    """Load (or fetch cached) score_net + diffuser + guidance model for this
+    thread's device, plus per-id init/ref atoms, target features, and ref
+    metrics (computed once)."""
+    if getattr(_thread_local, "device", None) is None:
+        _thread_local.device = _acquire_device()
+    dev = _thread_local.device
+
+    with _device_cache_lock:
+        if dev in _device_cache:
+            ctx = _device_cache[dev]
+        else:
+            experiment = Experiment(experiment_path)
+            cfg = experiment.load_config()
+            ckpt = experiment.find_checkpoint("best")
+            device = torch.device(dev if torch.cuda.is_available() else "cpu")
+
+            score_net = LitScoreNet.load_from_checkpoint(ckpt, map_location=device)
+            score_net.eval()
+            score_net.ema_model.to(device)
+            score_net.ema_model.eval()
+
+            dm = StructureSpecDataModule(
+                data_dir=experiment.get_data_dir_for_datamodule(),
+                cutoff=cfg.cutoff,
+                train_prior=True,
+                k=cfg.k,
+                train_size=0.9,
+                scale_y=1.0,
+                dup=128,
+                batch_size=32,
+                num_workers=0,
+            )
+            dm.setup()
+            diffuser = dm.train_set.diffuser
+
+            guidance_model = create_guidance_model(
+                guidance_type="pdf",
+                device=device,
+                cutoff=cfg.cutoff,
+                bin_size=cfg.bin_size,
+            )
+
+            ctx = DeviceCtx(
+                device=device,
+                score_net=score_net,
+                diffuser=diffuser,
+                guidance_model=guidance_model,
+                cutoff=cfg.cutoff,
+            )
+            _device_cache[dev] = ctx
+
+        # Lazily fill the init/ref/target caches for any new init paths.
+        for init_path in init_paths:
+            sub_id = init_path.stem
+            if sub_id in ctx.init_atoms_by_id:
+                continue
+            init_atoms = read(str(init_path))
+            ref_path = ref_dir / f"{sub_id}.xyz"
+            if not ref_path.exists():
+                raise FileNotFoundError(
+                    f"Reference for init {sub_id} not found at {ref_path}"
+                )
+            ref_atoms = read(str(ref_path))
+
+            # PDF target (tensor) on this device — for LikelihoodScore.
+            target = compute_target_from_reference(
+                ref_atoms, ctx.guidance_model, "pdf", ctx.cutoff, ctx.device,
+            )
+
+            # Reference structural metrics — for compute_all_errors at the end.
+            # Rings + Tersoff are included so compute_all_errors emits the
+            # full v4 error set (rings_emd, tersoff_*). Computed once per
+            # (sub_id, device) and cached.
+            ref_metrics = compute_all_metrics(
+                ref_atoms,
+                include_dihedrals=False,
+                include_sq=False,
+                include_voronoi=False,
+                include_rings=True,
+                rings_maxlength=10,
+                include_tersoff=True,
+                tersoff_device=str(ctx.device),
+            )
+
+            ctx.init_atoms_by_id[sub_id] = init_atoms
+            ctx.ref_atoms_by_id[sub_id] = ref_atoms
+            ctx.target_by_id[sub_id] = target
+            ctx.ref_metrics_by_id[sub_id] = ref_metrics
+
+        return ctx
+
+
+# --------------------------------------------------------------------------
+# One denoising run (mode-agnostic).
+# --------------------------------------------------------------------------
+
+def _run_single(
+    params: Dict,
+    sub_id: str,
+    mode: str,  # "uncond" or "cond"
+    ctx: DeviceCtx,
+) -> Atoms:
+    device = ctx.device
+    init_atoms = ctx.init_atoms_by_id[sub_id]
+    species, pos, cell = atoms_to_device(copy.deepcopy(init_atoms), device)
+    cell_np = cell.detach().cpu().numpy()
+
+    tersoff_guide = TersoffEnergyGuidance(clamp_norm=10.0)
+    tersoff_sched = TersoffSchedule(
+        schedule=params["tersoff_schedule"],
+        lambda_0=params["tersoff_lambda"],
+        tmax=params["tmax"],
+        t_gate=params["tersoff_t_gate"],
+    )
+
+    anneal_fn = None
+    if params["N_anneal"] > 0:
+        anneal_fn = make_anneal_fn(
+            tersoff_guidance=tersoff_guide,
+            n_steps=int(params["N_anneal"]),
+            T0=float(params["T0"]),
+            T_end=max(float(params["T0"]) * 1e-4, 1e-8),
+            lr=float(params["anneal_lr"]),
+            lr_clamp=0.2,
+        )
+
+    ts_torch = power_law_ts(
+        params["tmin"], params["tmax"], int(params["tstep"]),
+        rho=params["t_rho"], device=device,
+    )
+
+    score_net = ctx.score_net
+    diffuser = ctx.diffuser
+
+    def prior_fn(sp, p, c, t, co, _sn=score_net, _df=diffuser):
+        return compute_prior_score(sp, p, c, t, co, _sn, _df)
+
+    likelihood_fn = None
+    if mode == "cond":
+        likelihood_fn = LikelihoodScore(
+            score_net.ema_model,
+            ctx.guidance_model,
+            ctx.target_by_id[sub_id],
+            float(params["rho"]),
+            diffuser,
+            "pdf",
+            ctx.cutoff,
+        )
+
+    _, final_pos = denoise_by_sde(
+        species=species,
+        pos=pos,
+        cell=cell,
+        cutoff=ctx.cutoff,
+        score_fn=prior_fn,
+        likelihood_fn=likelihood_fn,
+        ts=ts_torch,
+        diffuser=diffuser,
+        save_traj=False,
+        tersoff_guidance=tersoff_guide,
+        tersoff_schedule=tersoff_sched,
+        n_corr=int(params["n_corr"]),
+        corr_step_size=float(params["corr_step_size"]),
+        corr_use_tersoff=True,
+        corr_t_gate=float(params["corr_t_gate"]),
+        anneal_fn=anneal_fn,
+    )
+
+    atoms_out = Atoms(
+        numbers=init_atoms.numbers,
+        positions=final_pos.cpu().numpy(),
+        cell=cell_np,
+        pbc=[True, True, True],
+    )
+    atoms_out.wrap()
+    return atoms_out
+
+
+# --------------------------------------------------------------------------
+# Search space.
+# --------------------------------------------------------------------------
+
+def _sample_params(trial) -> Dict:
+    return {
+        # --- Time schedule ---
+        "tstep": trial.suggest_categorical("tstep", [128, 256, 512]),
+        "tmin": trial.suggest_float("tmin", 1e-4, 5e-2, log=True),
+        "tmax": trial.suggest_float("tmax", 0.5, 1.0),
+        "t_rho": trial.suggest_float("t_rho", 0.3, 2.0),
+        # --- Tersoff guidance ---
+        "tersoff_lambda": trial.suggest_float("tersoff_lambda", 0.0, 0.3),
+        "tersoff_schedule": trial.suggest_categorical(
+            "tersoff_schedule", ["constant", "linear", "sigmoid"]
+        ),
+        "tersoff_t_gate": trial.suggest_float("tersoff_t_gate", 0.1, 0.8),
+        # --- Langevin corrector ---
+        "n_corr": trial.suggest_categorical("n_corr", [0, 1, 2]),
+        "corr_step_size": trial.suggest_float("corr_step_size", 0.05, 0.5),
+        "corr_t_gate": trial.suggest_float("corr_t_gate", 0.2, 0.8),
+        # --- Simulated-annealing tail ---
+        "N_anneal": trial.suggest_categorical("N_anneal", [0, 50, 100, 200]),
+        "T0": trial.suggest_float("T0", 1e-3, 1e-1, log=True),
+        "anneal_lr": trial.suggest_float("anneal_lr", 1e-4, 1e-2, log=True),
+        # --- Guidance strength (conditional mode only) ---
+        "rho": trial.suggest_float("rho", 1e1, 3e3, log=True),
+    }
+
+
+# --------------------------------------------------------------------------
+# Trial evaluation.
+# --------------------------------------------------------------------------
+
+def _evaluate_one(
+    params: Dict,
+    sub_id: str,
+    mode: str,
+    ctx: DeviceCtx,
+    seed: int,
+) -> Dict[str, float]:
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    atoms_out = _run_single(params, sub_id, mode, ctx)
+    metrics = compute_all_metrics(
+        atoms_out,
+        include_dihedrals=False,
+        include_sq=False,
+        include_voronoi=False,
+        include_rings=True,
+        rings_maxlength=10,
+        include_tersoff=True,
+        tersoff_device=str(ctx.device),
+    )
+    errors = compute_all_errors(ctx.ref_metrics_by_id[sub_id], metrics)
+    # Undercoord fractions are absolute properties of the generated
+    # structure (no reference). Compute inline; do not pollute
+    # compute_all_errors.
+    coords = metrics.coordination.coordination_numbers
+    errors["undercoord_frac_le3"] = float((coords <= 3).mean())
+    errors["undercoord_frac_le2"] = float((coords <= 2).mean())
+    # Backwards-compat alias used by some downstream tooling.
+    errors["undercoord_frac"] = errors["undercoord_frac_le3"]
+    return errors
+
+
+def _build_objective(
+    experiment_path: str,
+    buckets: List[Tuple[str, List[Path], Path]],
+    n_inits: int,
+    n_seeds: int,
+):
+    """Build the Optuna objective.
+
+    Args:
+        buckets: list of (density_label, init_paths, ref_dir) tuples. A
+            single-density study is a single-bucket list.
+    """
+    # Deterministic order so the same (sub_id, seed) pairs are evaluated
+    # across replay runs.
+    buckets = [
+        (label, sorted(paths)[: max(n_inits, 1)], ref_dir)
+        for label, paths, ref_dir in buckets
+    ]
+    all_paths_flat = [p for _, paths, _ in buckets for p in paths]
+
+    # Component error keys logged in user_attrs alongside the per-trial
+    # mean. Order matches the objective above.
+    _ERR_KEYS = (
+        "pdf_rmse",
+        "coordination_emd",
+        "undercoord_frac_le3",
+        "undercoord_frac_le2",
+        "rings_emd",
+        "tersoff_energy_error",
+        "tersoff_forces_rms_error",
+        "adf_rmse",
+    )
+
+    def objective(trial):
+        # Touch every bucket's ref_dir so the per-device cache fills lazily.
+        ctx = _get_device_ctx(experiment_path, [], buckets[0][2])
+        for label, paths, ref_dir in buckets:
+            _ensure_pairs(ctx, paths, ref_dir)
+
+        params = _sample_params(trial)
+
+        # Per-bucket cond-mode obj samples.
+        obj_samples_by_label: Dict[str, List[float]] = {
+            label: [] for label, _, _ in buckets
+        }
+        per_run_errors: List[Dict[str, object]] = []
+
+        step = 0
+        for seed_idx in range(n_seeds):
+            for label, paths, _ref_dir in buckets:
+                for init_path in paths:
+                    sub_id = init_path.stem
+                    seed = abs(
+                        1000 * int(trial.number) + 100 * seed_idx + 1
+                    ) + hash(sub_id) % 997
+                    t0 = time.time()
+                    try:
+                        errors = _evaluate_one(
+                            params, sub_id, "cond", ctx, int(seed),
+                        )
+                    except Exception as e:
+                        trial.set_user_attr("error", f"{type(e).__name__}: {e}")
+                        return float("inf")
+                    obj_samples_by_label[label].append(_phys_obj(errors))
+                    per_run_errors.append(
+                        {"label": label, "sub_id": sub_id, "mode": "cond",
+                         "seed": int(seed),
+                         "time_s": time.time() - t0, **errors}
+                    )
+            # Pruner-friendly running estimate (mean across buckets).
+            running_per_bucket = [
+                float(np.mean(samples))
+                for samples in obj_samples_by_label.values()
+                if samples
+            ]
+            if running_per_bucket:
+                trial.report(float(np.mean(running_per_bucket)), step=step)
+            step += 1
+            if trial.should_prune():
+                import optuna
+                raise optuna.TrialPruned()
+
+        # Per-bucket cond objective + aggregate.
+        per_bucket_obj: Dict[str, float] = {
+            label: float(np.mean(obj_samples_by_label[label]))
+            for label, _, _ in buckets
+        }
+        total = float(np.mean(list(per_bucket_obj.values())))
+
+        # Per-bucket user_attrs: full 7-component error means.
+        for label in per_bucket_obj:
+            err = {
+                k: float(np.mean(
+                    [e[k] for e in per_run_errors
+                     if e["label"] == label
+                     and isinstance(e.get(k), (int, float))]
+                ))
+                for k in _ERR_KEYS
+            }
+            trial.set_user_attr(f"mean_errors_cond_{label}", json.dumps(err))
+            trial.set_user_attr(f"obj_cond_{label}", per_bucket_obj[label])
+
+        # Aggregate cross-bucket attrs.
+        mean_err_cond = {
+            k: float(np.mean([e[k] for e in per_run_errors
+                              if isinstance(e.get(k), (int, float))]))
+            for k in _ERR_KEYS
+        }
+        trial.set_user_attr("device", str(ctx.device))
+        trial.set_user_attr("obj_cond", total)
+        trial.set_user_attr("mean_errors_cond", json.dumps(mean_err_cond))
+        trial.set_user_attr(
+            "bucket_labels", json.dumps([l for l, _, _ in buckets])
+        )
+
+        return total
+
+    return objective
+
+
+def _ensure_pairs(ctx: "DeviceCtx", init_paths: List[Path], ref_dir: Path) -> None:
+    """Lazy-fill ctx.{init_atoms,ref_atoms,target,ref_metrics}_by_id for
+    the given init_paths and ref_dir. Used by multi-bucket objectives."""
+    for init_path in init_paths:
+        sub_id = init_path.stem
+        if sub_id in ctx.init_atoms_by_id:
+            continue
+        init_atoms = read(str(init_path))
+        ref_path = ref_dir / f"{sub_id}.xyz"
+        if not ref_path.exists():
+            raise FileNotFoundError(
+                f"Reference for init {sub_id} not found at {ref_path}"
+            )
+        ref_atoms = read(str(ref_path))
+        target = compute_target_from_reference(
+            ref_atoms, ctx.guidance_model, "pdf", ctx.cutoff, ctx.device,
+        )
+        ref_metrics = compute_all_metrics(
+            ref_atoms,
+            include_dihedrals=False,
+            include_sq=False,
+            include_voronoi=False,
+            include_rings=True,
+            rings_maxlength=10,
+            include_tersoff=True,
+            tersoff_device=str(ctx.device),
+        )
+        ctx.init_atoms_by_id[sub_id] = init_atoms
+        ctx.ref_atoms_by_id[sub_id] = ref_atoms
+        ctx.target_by_id[sub_id] = target
+        ctx.ref_metrics_by_id[sub_id] = ref_metrics
+
+
+# --------------------------------------------------------------------------
+# CLI.
+# --------------------------------------------------------------------------
+
+def _parse_devices(s: str) -> List[str]:
+    return [d.strip() for d in s.split(",") if d.strip()]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument("experiment_path", type=str,
+                        help="Experiment dir containing checkpoints/, config.yaml.")
+    parser.add_argument("--ref-dir", type=str, default=None,
+                        help="Directory of reference *.xyz files (one per init sub_id). "
+                             "Single-density studies. Use --ref-dirs for multi-density.")
+    parser.add_argument("--ref-dirs", type=str, default=None,
+                        help="Comma-separated list of reference dirs, one per "
+                             "entry in --init-globs. Multi-density studies.")
+    parser.add_argument("--init-dir", type=str, required=True,
+                        help="Directory of init *.xyz files (will be matched to refs by filename stem).")
+    parser.add_argument("--init-glob", type=str, default=None,
+                        help="Glob pattern (relative to --init-dir) filtering inits. "
+                             "Single-density studies. Use --init-globs for multi-density.")
+    parser.add_argument("--init-globs", type=str, default=None,
+                        help="Comma-separated globs, one per density bucket. Each "
+                             "bucket gets its own ref dir from --ref-dirs (in order). "
+                             "Bucket label is the stripped pattern. Multi-density studies.")
+    parser.add_argument("--bucket-labels", type=str, default=None,
+                        help="Optional comma-separated user-friendly labels for the "
+                             "buckets (parallel to --init-globs). Default: derived "
+                             "from glob patterns.")
+    parser.add_argument("--n-trials", type=int, default=100)
+    parser.add_argument("--timeout", type=int, default=None,
+                        help="Seconds.")
+    parser.add_argument("--n-jobs", type=int, default=1)
+    parser.add_argument("--n-seeds", type=int, default=2,
+                        help="Random seeds per init per trial.")
+    parser.add_argument("--n-inits", type=int, default=2,
+                        help="Number of init structures per trial (sorted, deterministic).")
+    parser.add_argument("--devices", type=str, default="cuda:0",
+                        help="Comma-separated CUDA device list.")
+    parser.add_argument("--study-name", type=str, default="glass_phys_v5_15ood")
+    parser.add_argument("--storage", type=str,
+                        default="research/hpo/glass_phys_v5_15ood.db")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--replay-best", action="store_true",
+                        help="Skip search; re-run the current best trial with the "
+                             "provided --n-seeds and --n-inits.")
+    args = parser.parse_args()
+
+    import optuna
+    from optuna.pruners import MedianPruner
+    from optuna.samplers import TPESampler
+
+    global _device_pool
+    _device_pool = _parse_devices(args.devices) or ["cpu"]
+    print(f"Devices: {_device_pool}")
+
+    init_dir = Path(args.init_dir).resolve()
+
+    # Build the bucket list. Two paths:
+    #   - multi-density: --init-globs + --ref-dirs (parallel comma lists)
+    #   - single-density: --init-glob + --ref-dir (legacy)
+    if args.init_globs and args.ref_dirs:
+        globs = [g.strip() for g in args.init_globs.split(",") if g.strip()]
+        ref_dirs = [Path(d.strip()).resolve() for d in args.ref_dirs.split(",") if d.strip()]
+        if len(globs) != len(ref_dirs):
+            raise SystemExit(
+                f"--init-globs has {len(globs)} entries but --ref-dirs has "
+                f"{len(ref_dirs)}. They must match."
+            )
+        if args.bucket_labels:
+            labels = [l.strip() for l in args.bucket_labels.split(",")]
+            if len(labels) != len(globs):
+                raise SystemExit("--bucket-labels must match --init-globs count.")
+        else:
+            # Derive a label from each glob pattern (e.g. "init_Si_1.5_*.xyz" -> "1.5")
+            import re
+            labels = []
+            for g in globs:
+                m = re.search(r"(\d+\.\d+)", g)
+                labels.append(m.group(1) if m else g)
+        buckets: List[Tuple[str, List[Path], Path]] = []
+        for label, g, rd in zip(labels, globs, ref_dirs):
+            paths = sorted(init_dir.glob(g))
+            if not paths:
+                raise SystemExit(f"No init files matched {g!r} under {init_dir}")
+            missing = [p.stem for p in paths if not (rd / f"{p.stem}.xyz").exists()]
+            if missing:
+                raise SystemExit(
+                    f"Bucket {label}: {len(missing)} inits missing refs "
+                    f"in {rd}: {missing[:3]}..."
+                )
+            buckets.append((label, paths, rd))
+        print(
+            f"Multi-density study: {len(buckets)} buckets — "
+            + ", ".join(f"{l}({len(p)})" for l, p, _ in buckets)
+        )
+    elif args.init_glob and args.ref_dir:
+        ref_dir = Path(args.ref_dir).resolve()
+        init_paths = sorted(init_dir.glob(args.init_glob))
+        if not init_paths:
+            raise SystemExit(
+                f"No init files matched {args.init_glob!r} under {init_dir}"
+            )
+        missing = [p.stem for p in init_paths
+                   if not (ref_dir / f"{p.stem}.xyz").exists()]
+        if missing:
+            raise SystemExit(
+                f"{len(missing)} inits have no matching ref in {ref_dir}: "
+                f"{missing[:3]}..."
+            )
+        print(f"Single-density study: {len(init_paths)} init/ref pairs in {init_dir}")
+        buckets = [("all", init_paths, ref_dir)]
+    else:
+        raise SystemExit(
+            "Provide either --init-glob+--ref-dir (single-density) "
+            "or --init-globs+--ref-dirs (multi-density)."
+        )
+
+    print(f"Using first {args.n_inits} per bucket per trial.")
+
+    storage_path = Path(args.storage)
+    storage_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_url = f"sqlite:///{storage_path}"
+
+    study = optuna.create_study(
+        study_name=args.study_name,
+        storage=storage_url,
+        direction="minimize",
+        sampler=TPESampler(seed=args.seed),
+        pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=0, interval_steps=1),
+        load_if_exists=True,
+    )
+
+    objective = _build_objective(
+        args.experiment_path, buckets,
+        n_inits=args.n_inits, n_seeds=args.n_seeds,
+    )
+
+    if args.replay_best:
+        try:
+            best = study.best_trial
+        except ValueError:
+            raise SystemExit("No completed trials in this study yet.")
+        print("Replaying best trial:")
+        print(json.dumps(best.params, indent=2))
+
+        fake = optuna.trial.FixedTrial(best.params, number=-1)
+        val = objective(fake)
+        print(f"\nReplay objective (n_inits={args.n_inits}, "
+              f"n_seeds={args.n_seeds}): {val:.6f}")
+        ua = getattr(fake, "user_attrs", None) or getattr(fake, "_user_attrs", {})
+        if "error" in ua:
+            print(f"Error: {ua['error']}")
+            return
+        print(f"  obj_cond: {ua.get('obj_cond', float('nan')):.6f}")
+        if "mean_errors_cond" in ua:
+            print("  cond errors:  ", ua["mean_errors_cond"])
+        for k, v in ua.items():
+            if k.startswith("mean_errors_cond_") or k.startswith("obj_cond_"):
+                print(f"  {k}: {v}")
+        return
+
+    print(f"\nRunning {args.n_trials} trials "
+          f"(n_jobs={args.n_jobs}, n_seeds={args.n_seeds}, "
+          f"n_inits={args.n_inits}, cond-only => "
+          f"{args.n_inits*args.n_seeds} runs/trial/bucket)")
+
+    study.optimize(
+        objective,
+        n_trials=args.n_trials,
+        timeout=args.timeout,
+        n_jobs=args.n_jobs,
+        gc_after_trial=True,
+    )
+
+    try:
+        best = study.best_trial
+    except ValueError:
+        print("No successful trials.")
+        return
+
+    print("\n=== BEST TRIAL ===")
+    print(f"Value: {best.value:.6f}")
+    print("Params:")
+    for k, v in best.params.items():
+        print(f"  {k}: {v}")
+    print("User attrs:")
+    for k, v in best.user_attrs.items():
+        print(f"  {k}: {v}")
+
+    out_dir = storage_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    best_path = out_dir / f"{args.study_name}_best.json"
+    with open(best_path, "w") as f:
+        json.dump(
+            {
+                "value": float(best.value),
+                "params": best.params,
+                "user_attrs": best.user_attrs,
+                "weights": {
+                    "W_PDF": W_PDF,
+                    "W_COORD": W_COORD,
+                    "W_UC3": W_UC3,
+                    "W_UC2": W_UC2,
+                    "EPS3": EPS3,
+                    "EPS2": EPS2,
+                    "W_RINGS": W_RINGS,
+                    "W_TERSOFF_E": W_TERSOFF_E,
+                    "W_TERSOFF_F": W_TERSOFF_F,
+                    "W_ADF": W_ADF,
+                },
+            },
+            f, indent=2,
+        )
+    print(f"\nBest params written to {best_path}")
+
+    # Dump top-N summary.
+    all_trials = [t for t in study.trials if t.value is not None]
+    all_trials.sort(key=lambda t: t.value)
+    print("\nTop 5 trials:")
+    for t in all_trials[:5]:
+        ua = t.user_attrs
+        print(
+            f"  #{t.number}: value={t.value:.4f}  "
+            f"cond={ua.get('obj_cond', float('nan')):.4f}  "
+            f"tstep={t.params.get('tstep')} n_corr={t.params.get('n_corr')} "
+            f"N_anneal={t.params.get('N_anneal')} "
+            f"rho={t.params.get('rho'):.1f} "
+            f"tl={t.params.get('tersoff_lambda'):.3f}"
+        )
+
+
+if __name__ == "__main__":
+    main()
