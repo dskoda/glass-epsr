@@ -79,6 +79,143 @@ The linear and sigmoid variants suppress guidance in the high-noise regime
 where structures are far from any physical basin and the potential gradient
 is dominated by close contacts.
 
+\subsection{Differentiable coordination-number guidance}
+\label{sec:coord-guidance}
+
+The Tersoff term in Sec.~\ref{sec:tersoff} biases the trajectory toward
+configurations of low potential energy, but it acts only indirectly on the
+coordination distribution: a dangling atom can be locally relaxed without ever
+forming the missing bond. To address this we introduce a second auxiliary
+guidance term that targets the coordination distribution directly, without
+requiring a reference structure.
+
+\paragraph{Soft coordination number.}
+For each atom $i$, the integer coordination number
+$c_i^{\mathrm{int}}=\#\{j\neq i: r_{ij}\le r_c\}$ is non-differentiable in the
+positions because of the hard cutoff at $r_c$. We replace the indicator
+function with a cosine switching function $f$ that is identically one inside
+$r_c-w$, identically zero outside $r_c+w$, and smoothly interpolates between
+them with a single half-width parameter $w$:
+\begin{equation}
+    f(r;\,r_c,w)
+    =
+    \begin{cases}
+        1                                                        & r < r_c - w,\\[2pt]
+        \tfrac{1}{2}\!\left(1 + \cos\!\dfrac{\pi(r - (r_c - w))}{2w}\right) & r_c - w \le r < r_c + w,\\[8pt]
+        0                                                        & r \ge r_c + w.
+    \end{cases}
+    \label{eq:cosine-switch}
+\end{equation}
+Distances are evaluated under the minimum-image convention. The
+\emph{differentiable coordination number} of atom $i$ is
+\begin{equation}
+    c_i(\mathbf{x})
+    \;=\; \sum_{j\neq i} f\!\big(r_{ij}(\mathbf{x});\,r_c,w\big),
+    \label{eq:soft-coord}
+\end{equation}
+which agrees with $c_i^{\mathrm{int}}$ in the limit $w\to 0^{+}$ and remains
+differentiable in $\mathbf{x}$ for any $w>0$. We typically take $r_c$ as the
+first minimum of the target $g(r)$ (e.g.\ $r_c\approx 2.85$~\AA{} for
+amorphous Si) and $w=0.30$~\AA.
+
+\paragraph{Penalty modes.}
+The user specifies a target coordination distribution through a combination
+of three composable per-atom penalties:
+\begin{enumerate}
+    \item \textbf{Low-coordination hinge}, suppressing under-coordinated atoms
+          $c_i<n_{\mathrm{lo}}$:
+          \begin{equation}
+              \mathcal{L}_{\mathrm{lo}}(c)
+              = \frac{1}{k_{\mathrm{lo}}}\,\mathrm{softplus}\!\left(k_{\mathrm{lo}}\,(n_{\mathrm{lo}} - c)\right),
+              \label{eq:loss-lo}
+          \end{equation}
+          where $\mathrm{softplus}(x)=\log(1+e^{x})$.
+    \item \textbf{Pseudo-Huber target}, drawing $c_i$ toward $n_{\mathrm{tg}}$
+          with tolerance $\sigma_{\mathrm{tg}}$:
+          \begin{equation}
+              \mathcal{L}_{\mathrm{tg}}(c)
+              = \sigma_{\mathrm{tg}}^{2}\!\left(\sqrt{1+\Big(\tfrac{c - n_{\mathrm{tg}}}{\sigma_{\mathrm{tg}}}\Big)^{2}} - 1\right).
+              \label{eq:loss-tg}
+          \end{equation}
+    \item \textbf{High-coordination hinge}, suppressing over-coordinated atoms
+          $c_i>n_{\mathrm{hi}}$:
+          \begin{equation}
+              \mathcal{L}_{\mathrm{hi}}(c)
+              = \frac{1}{k_{\mathrm{hi}}}\,\mathrm{softplus}\!\left(k_{\mathrm{hi}}\,(c - n_{\mathrm{hi}})\right).
+              \label{eq:loss-hi}
+          \end{equation}
+\end{enumerate}
+The overall coordination loss is the per-atom mean of a non-negative weighted
+combination,
+\begin{equation}
+    \mathcal{L}_{\mathrm{cn}}(\mathbf{x})
+    = \frac{1}{N}\sum_{i=1}^{N}
+      \Big[
+        w_{\mathrm{lo}}\,\mathcal{L}_{\mathrm{lo}}(c_i)
+      + w_{\mathrm{tg}}\,\mathcal{L}_{\mathrm{tg}}(c_i)
+      + w_{\mathrm{hi}}\,\mathcal{L}_{\mathrm{hi}}(c_i)
+      \Big].
+    \label{eq:loss-cn}
+\end{equation}
+
+The three modes were chosen for their gradient behavior. For the hinges,
+$\partial\mathcal{L}_{\mathrm{lo}}/\partial c
+= -\sigma\!\left(k_{\mathrm{lo}}(n_{\mathrm{lo}}-c)\right)$ is bounded in
+$[-1,0]$, equals $-\tfrac{1}{2}$ at the boundary $c=n_{\mathrm{lo}}$, and
+saturates at $-1$ for $c\to 0$. The penalty therefore continues to push on
+residual violations close to the threshold (the gradient does not vanish near
+$c=n_{\mathrm{lo}}$) while remaining bounded in the worst case
+$c\to 0$ (the gradient does not diverge as a logarithmic penalty would). The
+analogous statements hold for $\mathcal{L}_{\mathrm{hi}}$. The pseudo-Huber
+target has a quadratic core,
+$\mathcal{L}_{\mathrm{tg}}(c)\approx \tfrac{1}{2}(c-n_{\mathrm{tg}})^{2}$ for
+$|c-n_{\mathrm{tg}}|\ll\sigma_{\mathrm{tg}}$, and a linear tail with bounded
+gradient $\pm\sigma_{\mathrm{tg}}$ in the far field; the bounded tail
+prevents one severely mis-coordinated atom from dominating the descent and
+overpowering the hinges.
+
+\paragraph{Per-atom guidance vector and schedule.}
+The coordination guidance is constructed in direct analogy with
+Eq.~\eqref{eq:tersoff-guide} by replacing the Tersoff energy with
+$\mathcal{L}_{\mathrm{cn}}$,
+\begin{equation}
+    \mathbf{u}_{\mathrm{cn}}(\mathbf{x})
+    = -\operatorname{clip}\!\left(
+        \frac{1}{N}\,\nabla_{\mathbf{x}}\mathcal{L}_{\mathrm{cn}}(\mathbf{x}),\,
+        c_{\mathrm{clamp}}^{\mathrm{cn}}
+      \right),
+    \label{eq:coord-guide}
+\end{equation}
+and is added to the score with its own schedule
+$\lambda_{\mathrm{cn}}(t)$ of the same family
+as~\eqref{eq:tersoff-schedule}. The full guided score used inside the
+predictor (and, optionally, the corrector) becomes
+\begin{equation}
+    \tilde{s}_\theta(\mathbf{x},t)
+    = s_\theta(\mathbf{x},t)
+    + \lambda(t)\,\mathbf{u}(\hat{\mathbf{x}}_{0})
+    + \lambda_{\mathrm{cn}}(t)\,\mathbf{u}_{\mathrm{cn}}(\hat{\mathbf{x}}_{0}),
+    \label{eq:total-guided-score}
+\end{equation}
+where $\hat{\mathbf{x}}_{0}=\mathbf{x}+\sigma(t)^{2}\,s_\theta(\mathbf{x},t)$
+is Tweedie's denoised estimate~\cite{efron2011tweedie}; evaluating both
+auxiliary terms on $\hat{\mathbf{x}}_{0}$ rather than on the noisy
+$\mathbf{x}$ reduces the impact of high-frequency noise on the gradient of
+$\mathcal{L}_{\mathrm{cn}}$. The two auxiliary terms compose orthogonally with
+any feature-matching guidance against an experimental or computational
+reference (e.g.\ $g(r)$, ADF, XRD, ND, EXAFS, XANES), all of which enter
+through a separate likelihood-score channel.
+
+\paragraph{Reference-free guidance.}
+Unlike the feature-matching channel, $\mathcal{L}_{\mathrm{cn}}$ requires no
+reference structure; only the targets
+$\{n_{\mathrm{lo}}, n_{\mathrm{tg}}, \sigma_{\mathrm{tg}}, n_{\mathrm{hi}}\}$
+and weights need to be specified. This is useful when chemically motivated
+priors on coordination are available but a representative reference $g(r)$
+is not, and also as an additional regularizer alongside reference-based
+guidance to suppress dangling and over-coordinated outliers that the score
+network is biased to produce at out-of-distribution densities.
+
 \subsection{Predictor--corrector sampling with power-law time grid}
 \label{sec:sampler}
 

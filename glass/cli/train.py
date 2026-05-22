@@ -202,6 +202,14 @@ KEY PARAMETERS:
     default=None,
     help="Number of best checkpoints to keep.",
 )
+@click.option(
+    "--params",
+    "params_file",
+    type=click.Path(exists=True),
+    default=None,
+    help="YAML file with hyperparameters to override experiment config. "
+         "Only keys present in the file are applied; explicit CLI flags take precedence.",
+)
 def train(
     experiment_path,
     model_type,
@@ -226,12 +234,13 @@ def train(
     refresh_rate,
     matmul_precision,
     save_top_k,
+    params_file,
 ):
     """Train a model with unified experiment structure."""
-    
+
     # Initialize experiment
     experiment = Experiment(experiment_path)
-    
+
     # Load or create config
     if experiment.config_path.exists() and not resume:
         click.echo(f"Loading existing config from {experiment.config_path}")
@@ -260,6 +269,11 @@ def train(
             config.spec_type = spec_type
             config.out_dim = 400 if spec_type == "exafs" else 100
     
+    # Apply params-file overrides (between experiment config and explicit CLI flags)
+    if params_file:
+        config.update_from_yaml(params_file)
+        click.echo(f"Applied params overrides from {params_file}")
+
     # Apply CLI overrides
     cli_overrides = {}
     if cutoff is not None:

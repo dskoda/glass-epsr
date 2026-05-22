@@ -61,6 +61,28 @@ glass generate ./my_experiment --inits ./my_experiment/inits/ \
     --guidance-type xrd --ref-path ./reference/ --element-names Si
 ```
 
+### 4. Override Hyperparameters via YAML
+
+All generation and training hyperparameters can be overridden with a YAML file, without touching the experiment's `config.yaml` or passing many CLI flags.
+
+```bash
+# Use the repo-wide defaults as a starting point
+cp glass/default_params.yaml my_run.yaml
+
+# Edit what you need, e.g.:
+#   n_restart: 1
+#   tersoff_lambda: 0.1
+#   tmax: 0.5
+
+# Pass to either command
+glass generate ./my_experiment --inits ./inits --params my_run.yaml
+glass train    ./my_experiment --model-type score --num-species 1 --params my_run.yaml
+```
+
+**Precedence** (highest wins): explicit CLI flags > `--params` file > experiment `config.yaml` > built-in defaults.
+
+Only keys present in the YAML file are applied; unmentioned parameters keep their current values. Unknown keys are ignored.
+
 ---
 
 ## Main Commands
@@ -72,6 +94,7 @@ glass generate ./my_experiment --inits ./my_experiment/inits/ \
 | `glass train <experiment> --model-type score` | Train score-based generative model |
 | `glass train <experiment> --model-type spec --spec-type exafs` | Train EXAFS surrogate model |
 | `glass train <experiment> --resume` | Resume from last checkpoint |
+| `glass train <experiment> --model-type score --params my_run.yaml` | Override hyperparameters from YAML |
 
 ### Generation
 
@@ -80,6 +103,7 @@ glass generate ./my_experiment --inits ./my_experiment/inits/ \
 | `glass generate <experiment> --inits <path>` | Unconditional denoising |
 | `glass generate <experiment> --inits <path> --guidance-type pdf --ref-path <path>` | PDF-guided generation |
 | `glass generate <experiment> --inits <path> --guidance-type xrd --element-names <names>` | XRD-guided generation |
+| `glass generate <experiment> --inits <path> --params my_run.yaml` | Override hyperparameters from YAML |
 
 **Guidance types**: `pdf`, `adf`, `xrd`, `nd`, `exafs`, `xanes`
 

@@ -27,6 +27,12 @@ def denoise_by_sde(
     corr_t_gate: float = 0.6,
     anneal_fn: Optional[Callable] = None,
     tersoff_tweedie: bool = True,
+    entropy_guidance: Optional[Callable] = None,
+    entropy_schedule: Optional[Callable] = None,
+    corr_use_entropy: bool = True,
+    coord_guidance: Optional[Callable] = None,
+    coord_schedule: Optional[Callable] = None,
+    corr_use_coord: bool = True,
 ) -> Tuple[Optional[List[Tensor]], Tensor]:
     """Run reverse SDE to denoise atomic positions.
 
@@ -80,6 +86,14 @@ def denoise_by_sde(
         raise ValueError(
             "tersoff_schedule must be provided when tersoff_guidance is set."
         )
+    if entropy_guidance is not None and entropy_schedule is None:
+        raise ValueError(
+            "entropy_schedule must be provided when entropy_guidance is set."
+        )
+    if coord_guidance is not None and coord_schedule is None:
+        raise ValueError(
+            "coord_schedule must be provided when coord_guidance is set."
+        )
     if n_corr > 0 and score_fn is None:
         raise ValueError("score_fn is required when n_corr > 0.")
 
@@ -103,6 +117,22 @@ def denoise_by_sde(
                 guidance_vec = tersoff_guidance(tersoff_pos, cell, species)
                 t_score = lam * guidance_vec
                 p_score = p_score + t_score
+
+        if entropy_guidance is not None:
+            lam_e = float(entropy_schedule(t))
+            if lam_e != 0.0:
+                sigma_t_e = diffuser.sigma(t)
+                ent_pos = (pos + sigma_t_e ** 2 * p_score).detach()
+                e_vec = entropy_guidance(ent_pos, cell, species)
+                p_score = p_score + lam_e * e_vec
+
+        if coord_guidance is not None:
+            lam_co = float(coord_schedule(t))
+            if lam_co != 0.0:
+                sigma_t_co = diffuser.sigma(t)
+                coord_pos = (pos + sigma_t_co ** 2 * p_score).detach()
+                c_vec = coord_guidance(coord_pos, cell, species)
+                p_score = p_score + lam_co * c_vec
 
         if likelihood_fn is not None:
             l_score, norm = likelihood_fn(species, pos, cell, t, cutoff)
@@ -155,6 +185,32 @@ def denoise_by_sde(
                                 tersoff_pos_c = pos
                             c_score = c_score + lam_c * tersoff_guidance(
                                 tersoff_pos_c, cell, species
+                            )
+                    if (
+                        corr_use_entropy
+                        and entropy_guidance is not None
+                    ):
+                        lam_ec = float(entropy_schedule(t))
+                        if lam_ec != 0.0:
+                            sigma_t_ec = diffuser.sigma(t)
+                            ent_pos_c = (
+                                pos + sigma_t_ec ** 2 * c_score
+                            ).detach()
+                            c_score = c_score + lam_ec * entropy_guidance(
+                                ent_pos_c, cell, species
+                            )
+                    if (
+                        corr_use_coord
+                        and coord_guidance is not None
+                    ):
+                        lam_coc = float(coord_schedule(t))
+                        if lam_coc != 0.0:
+                            sigma_t_coc = diffuser.sigma(t)
+                            coord_pos_c = (
+                                pos + sigma_t_coc ** 2 * c_score
+                            ).detach()
+                            c_score = c_score + lam_coc * coord_guidance(
+                                coord_pos_c, cell, species
                             )
                     pos = (
                         pos

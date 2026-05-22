@@ -14,6 +14,13 @@ from glass.lit.modules.tersoff_guidance import (
     TersoffEnergyGuidance,
     TersoffSchedule,
 )
+from glass.descriptors import TorchACSF, EntropyGuidance, EntropySchedule
+from glass.lit.modules.coord_guidance import (
+    DifferentiableCoordinationNumber,
+    CoordinationLoss,
+    CoordinationGuidance,
+    CoordinationSchedule,
+)
 from glass.diffusion.schedules import power_law_ts
 from glass.diffusion.annealing import make_anneal_fn
 from glass.utils.atoms_utils import (
@@ -313,6 +320,132 @@ GUIDANCE TYPES:
     default=None,
     help="[SA] Per-atom per-step displacement cap (Å).",
 )
+# Structural-entropy (ACSF variance) guidance
+@click.option(
+    "--entropy-guidance/--no-entropy-guidance",
+    default=None,
+    help="Add ACSF descriptor-variance gradient as an auxiliary score term.",
+)
+@click.option(
+    "--entropy-lambda",
+    type=float,
+    default=None,
+    help="[entropy] Weight lambda_0 for the entropy guidance schedule.",
+)
+@click.option(
+    "--entropy-schedule",
+    type=click.Choice(["constant", "linear", "sigmoid"]),
+    default=None,
+    help="[entropy] Shape of lambda(t).",
+)
+@click.option(
+    "--entropy-t-gate",
+    type=float,
+    default=None,
+    help="[entropy] Gate time fraction (active when t/tmax <= t_gate).",
+)
+@click.option(
+    "--entropy-r-cut",
+    type=float,
+    default=None,
+    help="[entropy] ACSF cutoff radius (Å).",
+)
+# Differentiable coordination-number guidance
+@click.option(
+    "--coord-guidance/--no-coord-guidance",
+    default=None,
+    help="Add differentiable coordination-number gradient as an auxiliary score term.",
+)
+@click.option(
+    "--coord-lambda",
+    type=float,
+    default=None,
+    help="[coord] Weight lambda_0 for the coord guidance schedule.",
+)
+@click.option(
+    "--coord-schedule",
+    type=click.Choice(["constant", "linear", "sigmoid"]),
+    default=None,
+    help="[coord] Shape of lambda(t).",
+)
+@click.option(
+    "--coord-t-gate",
+    type=float,
+    default=None,
+    help="[coord] Gate time fraction for the sigmoid schedule.",
+)
+@click.option(
+    "--coord-r-cut",
+    type=float,
+    default=None,
+    help="[coord] Cutoff radius for soft neighbour count (Å); typically the first PDF minimum.",
+)
+@click.option(
+    "--coord-smear",
+    type=float,
+    default=None,
+    help="[coord] Half-width of the cosine switching function (Å).",
+)
+@click.option(
+    "--coord-clamp",
+    type=float,
+    default=None,
+    help="[coord] Per-atom guidance-norm clamp.",
+)
+@click.option(
+    "--coord-n-target",
+    type=float,
+    default=None,
+    help="[coord] Target coordination number.",
+)
+@click.option(
+    "--coord-sigma-target",
+    type=float,
+    default=None,
+    help="[coord] Tolerance around target (pseudo-Huber width).",
+)
+@click.option(
+    "--coord-w-target",
+    type=float,
+    default=None,
+    help="[coord] Weight on the target-match penalty (0 disables).",
+)
+@click.option(
+    "--coord-n-low",
+    type=float,
+    default=None,
+    help="[coord] Low-coord threshold; atoms with c < n_low are penalised.",
+)
+@click.option(
+    "--coord-w-low",
+    type=float,
+    default=None,
+    help="[coord] Weight on the low-coord softplus hinge (0 disables).",
+)
+@click.option(
+    "--coord-k-low",
+    type=float,
+    default=None,
+    help="[coord] Sharpness of the low-coord hinge.",
+)
+@click.option(
+    "--coord-n-high",
+    type=float,
+    default=None,
+    help="[coord] High-coord threshold; atoms with c > n_high are penalised.",
+)
+@click.option(
+    "--coord-w-high",
+    type=float,
+    default=None,
+    help="[coord] Weight on the high-coord softplus hinge (0 disables).",
+)
+@click.option(
+    "--coord-k-high",
+    type=float,
+    default=None,
+    help="[coord] Sharpness of the high-coord hinge.",
+)
 @click.option(
     "--n-restart",
     type=int,
@@ -320,6 +453,14 @@ GUIDANCE TYPES:
     show_default=True,
     help="Number of full denoising passes per structure. 1 = single pass (default). "
          "Each restart starts from the previous pass output (same cell/species/guidance).",
+)
+@click.option(
+    "--params",
+    "params_file",
+    type=click.Path(exists=True),
+    default=None,
+    help="YAML file with generation hyperparameters to override experiment config. "
+         "Only keys present in the file are applied; explicit CLI flags take precedence.",
 )
 def generate(
     experiment_path,
@@ -363,19 +504,46 @@ def generate(
     sa_t_end,
     sa_lr,
     sa_lr_clamp,
+    entropy_guidance,
+    entropy_lambda,
+    entropy_schedule,
+    entropy_t_gate,
+    entropy_r_cut,
+    coord_guidance,
+    coord_lambda,
+    coord_schedule,
+    coord_t_gate,
+    coord_r_cut,
+    coord_smear,
+    coord_clamp,
+    coord_n_target,
+    coord_sigma_target,
+    coord_w_target,
+    coord_n_low,
+    coord_w_low,
+    coord_k_low,
+    coord_n_high,
+    coord_w_high,
+    coord_k_high,
     n_restart,
+    params_file,
 ):
     """Generate structures using trained score model."""
     import ase
     from ase.io import read
-    
+
     # Set CUDA memory config
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    
+
     # Load experiment
     experiment = Experiment(experiment_path)
     config = experiment.load_config()
-    
+
+    # Apply params-file overrides (between experiment config and explicit CLI flags)
+    if params_file:
+        config.update_from_yaml(params_file)
+        click.echo(f"Applied params overrides from {params_file}")
+
     # Verify this is a score model experiment
     if config.model_type != "score":
         raise click.ClickException(
@@ -433,6 +601,86 @@ def generate(
     sa_t_end = sa_t_end if sa_t_end is not None else config.sa_T_end
     sa_lr = sa_lr if sa_lr is not None else config.sa_lr
     sa_lr_clamp = sa_lr_clamp if sa_lr_clamp is not None else config.sa_lr_clamp
+    # Entropy guidance
+    entropy_guidance = (
+        entropy_guidance if entropy_guidance is not None
+        else getattr(config, "entropy_guidance", False)
+    )
+    entropy_lambda = (
+        entropy_lambda if entropy_lambda is not None
+        else getattr(config, "entropy_lambda", 1.0)
+    )
+    entropy_schedule = entropy_schedule or getattr(config, "entropy_schedule", "constant")
+    entropy_t_gate = (
+        entropy_t_gate if entropy_t_gate is not None
+        else getattr(config, "entropy_t_gate", 1.0)
+    )
+    entropy_r_cut = (
+        entropy_r_cut if entropy_r_cut is not None
+        else getattr(config, "entropy_r_cut", 4.0)
+    )
+    # Coordination-number guidance
+    coord_guidance = (
+        coord_guidance if coord_guidance is not None
+        else getattr(config, "coord_guidance", False)
+    )
+    coord_lambda = (
+        coord_lambda if coord_lambda is not None
+        else getattr(config, "coord_lambda", 1.0)
+    )
+    coord_schedule = coord_schedule or getattr(config, "coord_schedule", "constant")
+    coord_t_gate = (
+        coord_t_gate if coord_t_gate is not None
+        else getattr(config, "coord_t_gate", 1.0)
+    )
+    coord_r_cut = (
+        coord_r_cut if coord_r_cut is not None
+        else getattr(config, "coord_r_cut", 2.85)
+    )
+    coord_smear = (
+        coord_smear if coord_smear is not None
+        else getattr(config, "coord_smear", 0.30)
+    )
+    coord_clamp = (
+        coord_clamp if coord_clamp is not None
+        else getattr(config, "coord_clamp", 10.0)
+    )
+    coord_n_target = (
+        coord_n_target if coord_n_target is not None
+        else getattr(config, "coord_n_target", 4.0)
+    )
+    coord_sigma_target = (
+        coord_sigma_target if coord_sigma_target is not None
+        else getattr(config, "coord_sigma_target", 0.5)
+    )
+    coord_w_target = (
+        coord_w_target if coord_w_target is not None
+        else getattr(config, "coord_w_target", 1.0)
+    )
+    coord_n_low = (
+        coord_n_low if coord_n_low is not None
+        else getattr(config, "coord_n_low", 4.0)
+    )
+    coord_w_low = (
+        coord_w_low if coord_w_low is not None
+        else getattr(config, "coord_w_low", 0.0)
+    )
+    coord_k_low = (
+        coord_k_low if coord_k_low is not None
+        else getattr(config, "coord_k_low", 4.0)
+    )
+    coord_n_high = (
+        coord_n_high if coord_n_high is not None
+        else getattr(config, "coord_n_high", 7.0)
+    )
+    coord_w_high = (
+        coord_w_high if coord_w_high is not None
+        else getattr(config, "coord_w_high", 0.0)
+    )
+    coord_k_high = (
+        coord_k_high if coord_k_high is not None
+        else getattr(config, "coord_k_high", 4.0)
+    )
     n_restart = n_restart if n_restart is not None else getattr(config, "n_restart", 1)
     n_restart = max(1, int(n_restart))
     
@@ -489,6 +737,59 @@ def generate(
             lambda_0=tersoff_lambda,
             tmax=tmax,
             t_gate=tersoff_t_gate,
+        )
+
+    coord_guidance_fn = None
+    coord_schedule_fn = None
+    if coord_guidance:
+        click.echo(
+            f"Coord guidance: schedule={coord_schedule} "
+            f"lambda0={coord_lambda} t_gate={coord_t_gate} "
+            f"r_cut={coord_r_cut} smear={coord_smear} "
+            f"low(n={coord_n_low},w={coord_w_low},k={coord_k_low}) "
+            f"target(n={coord_n_target},sigma={coord_sigma_target},w={coord_w_target}) "
+            f"high(n={coord_n_high},w={coord_w_high},k={coord_k_high})"
+        )
+        coord_guidance_fn = CoordinationGuidance(
+            coord_fn=DifferentiableCoordinationNumber(
+                r_cut=coord_r_cut, smear=coord_smear,
+            ),
+            loss_fn=CoordinationLoss(
+                n_target=coord_n_target,
+                sigma_target=coord_sigma_target,
+                w_target=coord_w_target,
+                n_low=coord_n_low,
+                w_low=coord_w_low,
+                k_low=coord_k_low,
+                n_high=coord_n_high,
+                w_high=coord_w_high,
+                k_high=coord_k_high,
+            ),
+            clamp_norm=coord_clamp,
+        )
+        coord_schedule_fn = CoordinationSchedule(
+            schedule=coord_schedule,
+            lambda_0=coord_lambda,
+            tmax=tmax,
+            t_gate=coord_t_gate,
+        )
+
+    entropy_guidance_fn = None
+    entropy_schedule_fn = None
+    if entropy_guidance:
+        click.echo(
+            f"Entropy guidance: schedule={entropy_schedule} "
+            f"lambda0={entropy_lambda} t_gate={entropy_t_gate} "
+            f"r_cut={entropy_r_cut}"
+        )
+        entropy_guidance_fn = EntropyGuidance(
+            acsf=TorchACSF.for_silicon(r_cut=entropy_r_cut),
+        )
+        entropy_schedule_fn = EntropySchedule(
+            schedule=entropy_schedule,
+            lambda_0=entropy_lambda,
+            tmax=tmax,
+            t_gate=entropy_t_gate,
         )
 
     # Simulated-annealing post-relaxation: SA always runs on the Tersoff PES,
@@ -640,6 +941,10 @@ def generate(
             extra_tag.append(f"rho{t_schedule_rho:g}")
         if sa_n_steps and sa_n_steps > 0:
             extra_tag.append(f"sa{sa_n_steps}lr{sa_lr:g}")
+        if entropy_guidance:
+            extra_tag.append(f"ent_{entropy_schedule}_lam{entropy_lambda:g}")
+        if coord_guidance:
+            extra_tag.append(f"coord_{coord_schedule}_lam{coord_lambda:g}")
         if extra_tag:
             run_outdir = os.path.join(run_outdir, "_".join(extra_tag))
         os.makedirs(run_outdir, exist_ok=True)
@@ -676,6 +981,27 @@ def generate(
             "checkpoint": str(ckpt_path),
             "n_runs": n_runs,
             "n_restart": n_restart,
+            "entropy_guidance": bool(entropy_guidance),
+            "entropy_lambda": entropy_lambda if entropy_guidance else None,
+            "entropy_schedule": entropy_schedule if entropy_guidance else None,
+            "entropy_t_gate": entropy_t_gate if entropy_guidance else None,
+            "entropy_r_cut": entropy_r_cut if entropy_guidance else None,
+            "coord_guidance": bool(coord_guidance),
+            "coord_lambda": coord_lambda if coord_guidance else None,
+            "coord_schedule": coord_schedule if coord_guidance else None,
+            "coord_t_gate": coord_t_gate if coord_guidance else None,
+            "coord_r_cut": coord_r_cut if coord_guidance else None,
+            "coord_smear": coord_smear if coord_guidance else None,
+            "coord_clamp": coord_clamp if coord_guidance else None,
+            "coord_n_target": coord_n_target if coord_guidance else None,
+            "coord_sigma_target": coord_sigma_target if coord_guidance else None,
+            "coord_w_target": coord_w_target if coord_guidance else None,
+            "coord_n_low": coord_n_low if coord_guidance else None,
+            "coord_w_low": coord_w_low if coord_guidance else None,
+            "coord_k_low": coord_k_low if coord_guidance else None,
+            "coord_n_high": coord_n_high if coord_guidance else None,
+            "coord_w_high": coord_w_high if coord_guidance else None,
+            "coord_k_high": coord_k_high if coord_guidance else None,
             "init_file": init_file,
             "sub_id": sub_id,
         }
@@ -714,6 +1040,10 @@ def generate(
                     corr_use_tersoff=corr_use_tersoff,
                     corr_t_gate=corr_t_gate,
                     anneal_fn=anneal_fn if last_restart else None,
+                    entropy_guidance=entropy_guidance_fn,
+                    entropy_schedule=entropy_schedule_fn,
+                    coord_guidance=coord_guidance_fn,
+                    coord_schedule=coord_schedule_fn,
                 )
             final_pos = pos_current
             
