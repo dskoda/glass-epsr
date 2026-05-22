@@ -217,7 +217,6 @@ __all__ = [
     "tersoff_forces_emd",
     # Utilities
     "load_metrics_from_json",
-]
     'compute_weighted_error',
     # Tersoff energy/force metrics
     'TersoffMetrics',
