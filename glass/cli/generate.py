@@ -454,6 +454,14 @@ GUIDANCE TYPES:
     help="Number of full denoising passes per structure. 1 = single pass (default). "
          "Each restart starts from the previous pass output (same cell/species/guidance).",
 )
+@click.option(
+    "--params",
+    "params_file",
+    type=click.Path(exists=True),
+    default=None,
+    help="YAML file with generation hyperparameters to override experiment config. "
+         "Only keys present in the file are applied; explicit CLI flags take precedence.",
+)
 def generate(
     experiment_path,
     inits,
@@ -518,18 +526,24 @@ def generate(
     coord_w_high,
     coord_k_high,
     n_restart,
+    params_file,
 ):
     """Generate structures using trained score model."""
     import ase
     from ase.io import read
-    
+
     # Set CUDA memory config
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    
+
     # Load experiment
     experiment = Experiment(experiment_path)
     config = experiment.load_config()
-    
+
+    # Apply params-file overrides (between experiment config and explicit CLI flags)
+    if params_file:
+        config.update_from_yaml(params_file)
+        click.echo(f"Applied params overrides from {params_file}")
+
     # Verify this is a score model experiment
     if config.model_type != "score":
         raise click.ClickException(

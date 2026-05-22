@@ -9,7 +9,7 @@ import glob
 import yaml
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields as dataclass_fields
 
 
 @dataclass
@@ -175,6 +175,21 @@ class ExperimentConfig:
         """Update configuration with new values."""
         for key, value in kwargs.items():
             if hasattr(self, key):
+                setattr(self, key, value)
+        return self
+
+    def update_from_yaml(self, path: Union[str, Path]) -> "ExperimentConfig":
+        """Apply partial YAML overrides.
+
+        Only keys present in the file are updated; unmentioned fields keep
+        their current values.  Unknown keys are silently ignored so that
+        partial override files stay forward-compatible.
+        """
+        valid_keys = {f.name for f in dataclass_fields(self)}
+        with open(path, "r") as fh:
+            data = yaml.safe_load(fh) or {}
+        for key, value in data.items():
+            if key in valid_keys:
                 setattr(self, key, value)
         return self
 

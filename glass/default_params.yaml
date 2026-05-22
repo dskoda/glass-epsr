@@ -1,0 +1,149 @@
+# glass default hyperparameters
+# Source of truth: glass/experiment.py::ExperimentConfig
+# Generation defaults: glass_phys_v6_restart (2026-05-21), best trial #39, n_restart=3
+#
+# Usage:
+#   glass generate ./exp --inits ./inits --params glass/default_params.yaml
+#   glass train    ./exp --model-type score --num-species 1 --params glass/default_params.yaml
+#
+# Only keys present in the file are applied; CLI flags take precedence.
+
+# ---------------------------------------------------------------------------
+# Experiment metadata
+# ---------------------------------------------------------------------------
+name: experiment
+model_type: score      # "score" | "spec"
+
+# ---------------------------------------------------------------------------
+# Model architecture
+# ---------------------------------------------------------------------------
+num_species: 1
+num_convs: 5
+dim: 200
+ema_decay: 0.9999
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+max_epochs: 12000
+batch_size: 1
+learning_rate: 0.001
+cutoff: 5.0            # graph cutoff radius (Å)
+k: 0.8                 # max noise level
+dup: 4                 # dataset duplication factor
+train_size: 0.9        # train / validation split fraction
+scale_y: 1.0
+num_workers: 8
+save_top_k: 3
+
+# Spec model only (null for score models)
+spec_type: null        # "exafs" | "xanes"
+out_dim: null          # 400 for exafs, 100 for xanes
+data_dir: data
+
+# ---------------------------------------------------------------------------
+# Infrastructure
+# ---------------------------------------------------------------------------
+accelerator: gpu
+strategy: ddp_find_unused_parameters_true
+matmul_precision: medium
+refresh_rate: 10
+
+# ---------------------------------------------------------------------------
+# Generation — time schedule
+# Defaults from glass_phys_v6_restart, best trial #39.
+# rho=1.01 concentrates steps near t=0 (bond-formation regime).
+# ---------------------------------------------------------------------------
+checkpoint: best       # "best" | "last" | specific filename
+n_runs: 10
+tmin: 0.009267
+tmax: 0.938
+tstep: 256
+t_schedule_rho: 1.01   # power-law exponent; 1.0 = linspace
+n_restart: 3           # full denoising passes per structure
+save_traj: false
+device: cuda:0
+
+# ---------------------------------------------------------------------------
+# Conditional guidance
+# ---------------------------------------------------------------------------
+guidance_type: null    # "pdf" | "adf" | "xrd" | "nd" | "exafs" | "xanes"
+rho: 416.0             # guidance strength (scale-invariant via normalisation)
+ref_path: null
+exp_data: null
+spec_model_path: null
+
+# PDF
+bin_size: 100
+
+# ADF
+angle_bins: 100
+adf_sigma: 0.1
+adf_cutoff: 3.5
+
+# XRD / ND
+element_names: []
+qmin: 1.0
+qmax: 20.0
+qstep: 0.1
+biso: 1.5
+
+# ---------------------------------------------------------------------------
+# Tersoff empirical-potential guidance
+# sigmoid schedule: active in mid-trajectory only (not early high-noise steps)
+# t_gate=0.490: gate at 49% of tmax; lambda=0.30 (user preference, HPO best=0.128)
+# ---------------------------------------------------------------------------
+tersoff_guidance: true
+tersoff_lambda: 0.30
+tersoff_schedule: sigmoid  # "constant" | "linear" | "sigmoid"
+tersoff_t_gate: 0.490
+tersoff_clamp: 10.0
+
+# ---------------------------------------------------------------------------
+# Langevin predictor-corrector
+# n_corr=2, active when t <= corr_t_gate * tmax
+# ---------------------------------------------------------------------------
+n_corr: 2
+corr_step_size: 0.44
+corr_use_tersoff: true
+corr_t_gate: 0.464
+
+# ---------------------------------------------------------------------------
+# Simulated-annealing post-relaxation (disabled: HPO converged on sa_n_steps=0)
+# ---------------------------------------------------------------------------
+sa_n_steps: 0
+sa_T0: 0.01
+sa_T_end: 1.0e-05
+sa_lr: 0.001
+sa_lr_clamp: 0.2
+
+# ---------------------------------------------------------------------------
+# Structural-entropy guidance (disabled by default)
+# ---------------------------------------------------------------------------
+entropy_guidance: false
+entropy_lambda: 1.0
+entropy_schedule: constant  # "constant" | "linear" | "sigmoid"
+entropy_t_gate: 1.0
+entropy_r_cut: 4.0
+
+# ---------------------------------------------------------------------------
+# Differentiable coordination-number guidance (disabled by default)
+# Three composable penalties: low hinge, target match, high hinge.
+# Set w_low > 0 or w_high > 0 to activate those penalty arms.
+# ---------------------------------------------------------------------------
+coord_guidance: false
+coord_lambda: 1.0
+coord_schedule: constant    # "constant" | "linear" | "sigmoid"
+coord_t_gate: 1.0
+coord_r_cut: 2.85           # cutoff at first PDF minimum (Å)
+coord_smear: 0.30           # cosine-switch half-width (Å)
+coord_clamp: 10.0
+coord_n_target: 4.0         # target coordination number
+coord_sigma_target: 0.5     # pseudo-Huber tolerance
+coord_w_target: 1.0         # weight on target-match penalty
+coord_n_low: 4.0
+coord_w_low: 0.0            # 0 = disabled
+coord_k_low: 4.0
+coord_n_high: 7.0
+coord_w_high: 0.0           # 0 = disabled
+coord_k_high: 4.0
