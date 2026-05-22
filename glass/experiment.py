@@ -64,8 +64,8 @@ class ExperimentConfig:
     # All other params fixed at v5-best values.
     checkpoint: str = "best"  # "best", "last", or specific filename
     n_runs: int = 10
-    tmin: float = 9.267e-3
-    tmax: float = 0.938
+    tmin: float = 5.0e-3
+    tmax: float = 0.95
     tstep: int = 256
     save_traj: bool = False
     device: str = "cuda:0"
@@ -73,7 +73,7 @@ class ExperimentConfig:
     # Guidance parameters (for conditional generation).
     # rho=416 carried over from v5 (fixed in v6 search).
     guidance_type: Optional[str] = None  # "pdf", "adf", "xrd", "nd", "exafs", "xanes"
-    rho: float = 416.0
+    rho: float = 500.0
     ref_path: Optional[str] = None
     exp_data: Optional[str] = None
     spec_model_path: Optional[str] = None
@@ -96,16 +96,16 @@ class ExperimentConfig:
     tersoff_guidance: bool = True
     tersoff_lambda: float = 0.30
     tersoff_schedule: str = "sigmoid"
-    tersoff_t_gate: float = 0.490
+    tersoff_t_gate: float = 0.50
     tersoff_clamp: float = 10.0
 
     # Sampler refinements (v6 fixed params, carried from v5 best).
     # n_corr=2, corr_step_size=0.44, corr_t_gate=0.464, t_schedule_rho=1.01
     n_corr: int = 2
-    corr_step_size: float = 0.44
+    corr_step_size: float = 0.50
     corr_use_tersoff: bool = True
-    corr_t_gate: float = 0.464
-    t_schedule_rho: float = 1.01
+    corr_t_gate: float = 0.50
+    t_schedule_rho: float = 1.0
 
     # Simulated-annealing post-relaxation. The HPO study converged on
     # N_anneal=0 — the Langevin corrector already captures what SA would do,

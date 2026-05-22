@@ -56,10 +56,10 @@ refresh_rate: 10
 # ---------------------------------------------------------------------------
 checkpoint: best       # "best" | "last" | specific filename
 n_runs: 10
-tmin: 0.009267
-tmax: 0.938
+tmin: 0.005
+tmax: 0.950
 tstep: 256
-t_schedule_rho: 1.01   # power-law exponent; 1.0 = linspace
+t_schedule_rho: 1.0    # power-law exponent; 1.0 = linspace
 n_restart: 3           # full denoising passes per structure
 save_traj: false
 device: cuda:0
@@ -68,7 +68,7 @@ device: cuda:0
 # Conditional guidance
 # ---------------------------------------------------------------------------
 guidance_type: null    # "pdf" | "adf" | "xrd" | "nd" | "exafs" | "xanes"
-rho: 416.0             # guidance strength (scale-invariant via normalisation)
+rho: 500.0             # guidance strength (scale-invariant via normalisation)
 ref_path: null
 exp_data: null
 spec_model_path: null
@@ -96,7 +96,7 @@ biso: 1.5
 tersoff_guidance: true
 tersoff_lambda: 0.30
 tersoff_schedule: sigmoid  # "constant" | "linear" | "sigmoid"
-tersoff_t_gate: 0.490
+tersoff_t_gate: 0.50
 tersoff_clamp: 10.0
 
 # ---------------------------------------------------------------------------
@@ -104,9 +104,9 @@ tersoff_clamp: 10.0
 # n_corr=2, active when t <= corr_t_gate * tmax
 # ---------------------------------------------------------------------------
 n_corr: 2
-corr_step_size: 0.44
+corr_step_size: 0.50
 corr_use_tersoff: true
-corr_t_gate: 0.464
+corr_t_gate: 0.50
 
 # ---------------------------------------------------------------------------
 # Simulated-annealing post-relaxation (disabled: HPO converged on sa_n_steps=0)
