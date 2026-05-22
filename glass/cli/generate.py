@@ -23,7 +23,7 @@ from glass.lit.modules.coord_guidance import (
 )
 from glass.diffusion.schedules import power_law_ts
 from glass.diffusion.annealing import make_anneal_fn
-from glass.utils.atoms_utils import (
+from glass.utils.atoms import (
     atoms_to_device,
     compute_prior_score,
     compute_target_from_reference,

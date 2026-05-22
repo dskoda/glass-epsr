@@ -268,7 +268,7 @@ def write_spec_feature(
     from ase.data import chemical_symbols
     from collections import defaultdict
     from glass.lit.modules import DifferentiableRDF, DifferentiableADF, LitSpecNet
-    from glass.lit.functions.get_atoms import initialize_atoms
+    from glass.utils.atoms import initialize_atoms
     from glass.nn import periodic_radius_graph
     from debyecalculator import DebyeCalculator
 

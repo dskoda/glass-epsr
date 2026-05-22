@@ -19,7 +19,7 @@ from glass.lit.modules import LitScoreNet, DifferentiableRDF
 from glass.lit.datamodules import StructureSpecDataModule
 from glass.diffusion.sampling import denoise_by_sde
 from glass.lit.modules.likelihood import LikelihoodScore
-from glass.utils.atoms_utils import atoms_to_device, compute_prior_score
+from glass.utils.atoms import atoms_to_device, compute_prior_score
 from glass.nn import periodic_radius_graph
 
 
