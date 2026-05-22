@@ -51,8 +51,7 @@ KMP_DUPLICATE_LIB_OK=TRUE pytest -v
 │   │   ├── generate.py                 # `glass generate`
 │   │   ├── train.py                    # `glass train`
 │   │   ├── initialize.py               # `glass initialize`
-│   │   ├── metrics.py                  # `glass metrics` / `compare` / `pdf` / ...
-│   │   └── analysis.py
+│   │   └── metrics.py                  # `glass metrics` / `compare` / `pdf` / ...
 │   ├── diffusion/
 │   │   ├── sampling.py                 # denoise_by_sde (unified loop)
 │   │   ├── schedules.py                # power_law_ts
