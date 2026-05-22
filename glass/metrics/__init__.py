@@ -5,83 +5,68 @@ including PDF, ADF, coordination numbers, dihedral angles, structure factors,
 and ring statistics.
 """
 
+from typing import Optional
+
+# Main entry point
+from ase import Atoms
+
 # Core dataclasses
 from glass.metrics.core import (
-    PDFMetrics,
     ADFMetrics,
     CoordinationMetrics,
     DihedralMetrics,
-    StructureFactorMetrics,
-    VoronoiMetrics,
+    PDFMetrics,
     RingMetrics,
     StructuralMetrics,
+    StructureFactorMetrics,
+    VoronoiMetrics,
 )
 
-# Structural metrics (PDF, ADF)
-from glass.metrics.structural import (
-    compute_pdf,
-    compute_adf,
+# Error metrics for comparison
+from glass.metrics.errors import (  # PDF error metrics; ADF error metrics; Coordination error metrics; Combined metrics
+    adf_cosine_similarity,
+    adf_rmse,
+    compute_all_errors,
+    compute_weighted_error,
+    coordination_emd,
+    coordination_histogram_rmse,
+    coordination_mean_error,
+    coordination_std_error,
+    pdf_area_between,
+    pdf_cosine_similarity,
+    pdf_mae,
+    pdf_peak_height_error,
+    pdf_peak_position_error,
+    pdf_r_chi2,
+    pdf_rmse,
 )
 
 # Geometric metrics (coordination, dihedrals)
-from glass.metrics.geometric import (
-    compute_coordination,
-    compute_dihedrals,
-)
+from glass.metrics.geometric import compute_coordination, compute_dihedrals
 
 # Ring statistics metrics
-from glass.metrics.rings import (
-    compute_rings,
-    compute_rings_distribution,
-)
+from glass.metrics.rings import compute_rings, compute_rings_distribution
+
+# Advanced metrics (structure factor, Voronoi)
+from glass.metrics.sq import compute_structure_factor
+
+# Structural metrics (PDF, ADF)
+from glass.metrics.structural import compute_adf, compute_pdf
 
 # Tersoff energy/force metrics
 from glass.metrics.tersoff import (
     TersoffMetrics,
     compute_tersoff_metrics,
     tersoff_energy_error,
-    tersoff_forces_rms_error,
-    tersoff_forces_max_error,
-    tersoff_forces_histogram_rmse,
     tersoff_forces_emd,
-)
-
-# Advanced metrics (structure factor, Voronoi)
-from glass.metrics.advanced import (
-    compute_structure_factor,
-    compute_voronoi,
-)
-
-# Error metrics for comparison
-from glass.metrics.errors import (
-    # PDF error metrics
-    pdf_rmse,
-    pdf_mae,
-    pdf_area_between,
-    pdf_cosine_similarity,
-    pdf_r_chi2,
-    pdf_peak_position_error,
-    pdf_peak_height_error,
-    # ADF error metrics
-    adf_rmse,
-    adf_cosine_similarity,
-    # Coordination error metrics
-    coordination_emd,
-    coordination_histogram_rmse,
-    coordination_mean_error,
-    coordination_std_error,
-    # Combined metrics
-    compute_all_errors,
-    compute_weighted_error,
+    tersoff_forces_histogram_rmse,
+    tersoff_forces_max_error,
+    tersoff_forces_rms_error,
 )
 
 # Utility functions
 from glass.metrics.utils import load_metrics_from_json
-
-
-# Main entry point
-from ase import Atoms
-from typing import Optional
+from glass.metrics.voronoi import compute_voronoi
 
 
 def compute_all_metrics(
@@ -125,42 +110,42 @@ def compute_all_metrics(
     cell = atoms.cell.cellpar().tolist()  # [a, b, c, alpha, beta, gamma]
     volume = atoms.get_volume()
     density = n_atoms / volume if volume > 0 else 0.0
-    
+
     # Compute PDF (always needed, may be used for auto-cutoff)
     pdf_metrics = compute_pdf(atoms, cutoff=pdf_cutoff)
-    
+
     # Determine cutoffs
     if auto_cutoff and pdf_metrics.coord_cutoff is not None:
         if adf_cutoff is None:
             adf_cutoff = pdf_metrics.coord_cutoff
         if coord_cutoff is None:
             coord_cutoff = pdf_metrics.coord_cutoff
-    
+
     # Use defaults if still None
     if adf_cutoff is None:
         adf_cutoff = 3.5
     if coord_cutoff is None:
         coord_cutoff = 3.0
-    
+
     # Compute other metrics
     adf_metrics = compute_adf(atoms, cutoff=adf_cutoff, auto_cutoff=False)
     coord_metrics = compute_coordination(atoms, cutoff=coord_cutoff, auto_cutoff=False)
-    
+
     # Optional metrics
     dihedral_metrics = None
     sq_metrics = None
     voronoi_metrics = None
     rings_metrics = None
-    
+
     if include_dihedrals:
         dihedral_metrics = compute_dihedrals(atoms)
-    
+
     if include_sq:
         sq_metrics = compute_structure_factor(atoms)
-    
+
     if include_voronoi:
         voronoi_metrics = compute_voronoi(atoms)
-    
+
     if include_rings:
         rings_metrics = compute_rings(
             atoms, cutoff=coord_cutoff, maxlength=rings_maxlength, auto_cutoff=False
@@ -188,39 +173,50 @@ def compute_all_metrics(
 
 __all__ = [
     # Dataclasses
-    'PDFMetrics',
-    'ADFMetrics',
-    'CoordinationMetrics',
-    'DihedralMetrics',
-    'StructureFactorMetrics',
-    'VoronoiMetrics',
-    'RingMetrics',
-    'StructuralMetrics',
+    "PDFMetrics",
+    "ADFMetrics",
+    "CoordinationMetrics",
+    "DihedralMetrics",
+    "StructureFactorMetrics",
+    "VoronoiMetrics",
+    "RingMetrics",
+    "StructuralMetrics",
     # Computation functions
-    'compute_pdf',
-    'compute_adf',
-    'compute_coordination',
-    'compute_dihedrals',
-    'compute_structure_factor',
-    'compute_voronoi',
-    'compute_rings',
-    'compute_rings_distribution',
-    'compute_all_metrics',
+    "compute_pdf",
+    "compute_adf",
+    "compute_coordination",
+    "compute_dihedrals",
+    "compute_structure_factor",
+    "compute_voronoi",
+    "compute_rings",
+    "compute_rings_distribution",
+    "compute_all_metrics",
     # Error metrics
-    'pdf_rmse',
-    'pdf_mae',
-    'pdf_area_between',
-    'pdf_cosine_similarity',
-    'pdf_r_chi2',
-    'pdf_peak_position_error',
-    'pdf_peak_height_error',
-    'adf_rmse',
-    'adf_cosine_similarity',
-    'coordination_emd',
-    'coordination_histogram_rmse',
-    'coordination_mean_error',
-    'coordination_std_error',
-    'compute_all_errors',
+    "pdf_rmse",
+    "pdf_mae",
+    "pdf_area_between",
+    "pdf_cosine_similarity",
+    "pdf_r_chi2",
+    "pdf_peak_position_error",
+    "pdf_peak_height_error",
+    "adf_rmse",
+    "adf_cosine_similarity",
+    "coordination_emd",
+    "coordination_histogram_rmse",
+    "coordination_mean_error",
+    "coordination_std_error",
+    "compute_all_errors",
+    "compute_weighted_error",
+    # Tersoff energy/force metrics
+    "TersoffMetrics",
+    "compute_tersoff_metrics",
+    "tersoff_energy_error",
+    "tersoff_forces_rms_error",
+    "tersoff_forces_max_error",
+    "tersoff_forces_histogram_rmse",
+    "tersoff_forces_emd",
+    # Utilities
+    "load_metrics_from_json",
     'compute_weighted_error',
     # Tersoff energy/force metrics
     'TersoffMetrics',

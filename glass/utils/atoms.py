@@ -1,34 +1,36 @@
-"""Utilities for ASE atoms manipulation and tensor conversion.
-
-This module provides helper functions for converting between ASE Atoms objects
-and PyTorch tensors used by the models.
-"""
-
+import numpy as np
 import torch
 from torch import Tensor
 from typing import Tuple, Union
 import ase
+from sklearn.preprocessing import OneHotEncoder
 
-from glass.lit.functions.get_atoms import initialize_atoms
+
+def initialize_atoms(init_atoms):
+    node_encoder = OneHotEncoder(sparse_output=False)
+    x = node_encoder.fit_transform(init_atoms.numbers.reshape(-1, 1))
+    init_species = torch.tensor(x, dtype=torch.float)
+    init_pos = torch.tensor(init_atoms.positions, dtype=torch.float)
+    init_cell = torch.tensor(init_atoms.cell.tolist(), dtype=torch.float)
+    Z_list = node_encoder.categories_[0].tolist()
+    return Z_list, init_species, init_pos, init_cell
+
+
+def get_dH(ref, test):
+    from quests.descriptor import get_descriptors
+    from quests.entropy import approx_delta_entropy
+
+    k, cutoff = 32, 5.0
+    x1 = get_descriptors([test], k=k, cutoff=cutoff)
+    x2 = get_descriptors([ref], k=k, cutoff=cutoff)
+    dH = approx_delta_entropy(x1, x2, h=0.015, n=5, graph_neighbors=10)
+    return np.mean([x for x in dH if x < 5000])
 
 
 def atoms_to_device(
     atoms: ase.Atoms,
     device: Union[str, torch.device],
-) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Convert ASE Atoms to tensors and move to device.
-    
-    Args:
-        atoms: ASE Atoms object
-        device: Target device for tensors
-    
-    Returns:
-        (z_list, species, pos, cell) where:
-        - z_list: Atomic numbers list
-        - species: One-hot encoded species tensor
-        - pos: Positions tensor [N, 3]
-        - cell: Cell tensor [3, 3]
-    """
+) -> Tuple[Tensor, Tensor, Tensor]:
     device = torch.device(device)
     _, species, pos, cell = initialize_atoms(atoms)
     return (
@@ -47,22 +49,8 @@ def compute_prior_score(
     score_net,
     diffuser,
 ) -> Tensor:
-    """Compute prior score using the score network.
-    
-    Args:
-        species: Atomic species tensor
-        pos: Atomic positions tensor
-        cell: Unit cell tensor
-        t: Time step tensor
-        cutoff: Graph cutoff radius
-        score_net: Score network (EMA model)
-        diffuser: Diffuser for sigma computation
-    
-    Returns:
-        Prior score tensor
-    """
     from glass.nn import periodic_radius_graph
-    
+
     edge_index, edge_vec = periodic_radius_graph(pos, cutoff, cell)
     edge_attr = torch.hstack([edge_vec, edge_vec.norm(dim=-1, keepdim=True)])
     return score_net.ema_model(species, edge_index, edge_attr, t, diffuser.sigma(t))
@@ -75,33 +63,21 @@ def compute_target_from_reference(
     cutoff: float,
     device: Union[str, torch.device],
 ) -> Tensor:
-    """Compute target feature from reference atoms.
-    
-    Args:
-        ref_atoms: Reference ASE Atoms object
-        guidance_model: Guidance model for computing features
-        guidance_type: Type of guidance
-        cutoff: Graph cutoff radius
-        device: Target device for output tensor
-    
-    Returns:
-        Target feature tensor on specified device
-    """
     from glass.nn import periodic_radius_graph
-    
+
     device = torch.device(device)
     _, ref_species, ref_pos, ref_cell = initialize_atoms(ref_atoms)
-    
+
     if guidance_type in ("pdf", "adf"):
         return guidance_model(
             ref_pos.cpu(), ref_species.cpu(), ref_cell.cpu()
         )[1].to(device)
-    
+
     elif guidance_type in ("xrd", "nd"):
         return guidance_model(
             ref_pos.to(device), ref_species.to(device)
         )
-    
+
     elif guidance_type in ("exafs", "xanes"):
         ei_r, ev_r = periodic_radius_graph(
             ref_pos.to(device), cutoff, ref_cell.to(device)
@@ -109,6 +85,6 @@ def compute_target_from_reference(
         ea_r = torch.hstack([ev_r, ev_r.norm(dim=-1, keepdim=True)])
         with torch.no_grad():
             return guidance_model(ref_species.to(device), ei_r, ea_r)
-    
+
     else:
         raise ValueError(f"Unknown guidance type: {guidance_type}")

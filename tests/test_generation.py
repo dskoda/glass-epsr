@@ -21,7 +21,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 from glass.lit.modules import LitScoreNet, DifferentiableRDF
 from glass.lit.datamodules import StructureSpecDataModule
 from glass.diffusion.sampling import denoise_by_sde
-from glass.utils.atoms_utils import atoms_to_device, compute_prior_score
+from glass.utils.atoms import atoms_to_device, compute_prior_score
 
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -54,7 +54,7 @@ def compute_pdf(atoms: Atoms, cutoff: float = 5.0, bin_size: int = 100) -> np.nd
     pdf_model.eval()
     
     # Convert to tensors
-    from glass.lit.functions.get_atoms import initialize_atoms
+    from glass.utils.atoms import initialize_atoms
     _, species, pos, cell = initialize_atoms(atoms)
     
     with torch.no_grad():

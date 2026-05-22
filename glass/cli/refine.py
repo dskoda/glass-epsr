@@ -34,7 +34,7 @@ from glass.lit.modules.tersoff_guidance import (
     TersoffEnergyGuidance,
     TersoffSchedule,
 )
-from glass.utils.atoms_utils import (
+from glass.utils.atoms import (
     atoms_to_device,
     compute_prior_score,
     compute_target_from_reference,

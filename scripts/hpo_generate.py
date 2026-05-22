@@ -56,7 +56,7 @@ from glass.lit.modules.tersoff_guidance import (
 from glass.metrics import compute_all_metrics
 from glass.metrics.errors import compute_all_errors
 from glass.metrics.utils import load_metrics_from_json
-from glass.utils.atoms_utils import atoms_to_device, compute_prior_score
+from glass.utils.atoms import atoms_to_device, compute_prior_score
 
 
 # --------------------------------------------------------------------------

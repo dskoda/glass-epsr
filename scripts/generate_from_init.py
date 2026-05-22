@@ -21,12 +21,12 @@ from ase import Atoms
 from glass.lit.modules import LitScoreNet, DifferentiableRDF
 from glass.lit.datamodules import StructureSpecDataModule
 from glass.diffusion.sampling import denoise_by_sde
-from glass.utils.atoms_utils import atoms_to_device, compute_prior_score
+from glass.utils.atoms import atoms_to_device, compute_prior_score
 
 
 def compute_pdf_comparison(initial_atoms: Atoms, final_atoms: Atoms, cutoff: float = 5.0, bin_size: int = 100):
     """Compute and compare PDFs of initial and final structures."""
-    from glass.lit.functions.get_atoms import initialize_atoms
+    from glass.utils.atoms import initialize_atoms
     
     pdf_model = DifferentiableRDF(cutoff=cutoff, bin_size=bin_size, sigma=0.15)
     pdf_model.eval()

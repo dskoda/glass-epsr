@@ -96,7 +96,7 @@ from glass.lit.modules.likelihood import LikelihoodScore
 from glass.lit.modules.tersoff_guidance import TersoffEnergyGuidance, TersoffSchedule
 from glass.metrics import compute_all_metrics
 from glass.metrics.errors import compute_all_errors
-from glass.utils.atoms_utils import (
+from glass.utils.atoms import (
     atoms_to_device,
     compute_prior_score,
     compute_target_from_reference,
