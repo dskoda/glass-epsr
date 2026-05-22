@@ -116,7 +116,13 @@
       "Bash(ps -p 910444 -o pid,stat,etime)",
       "Bash(KMP_DUPLICATE_LIB_OK=TRUE nohup python scripts/hpo_phys_v6.py research/density_extrapolation/experiment/ --ref-dir research/density_extrapolation/results/generated/cond/density_1.5/reference --init-dir research/density_extrapolation/experiment/inits --init-glob init_Si_1.5_*.xyz --n-trials 100 --n-seeds 1 --n-inits 5 --n-jobs 4 --devices cuda:0,cuda:1,cuda:2,cuda:3 --study-name glass_phys_v6_restart --storage research/hpo/glass_phys_v6_restart.db)",
       "Bash(ps -p 3453072 -o pid,stat,etime)",
-      "Bash(KMP_DUPLICATE_LIB_OK=TRUE glass generate --help)"
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE glass generate --help)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/hpo_entropy_v1.py research/density_extrapolation/experiment/ --ref-dir research/density_extrapolation/results/generated/cond/density_1.5/reference --init-dir research/density_extrapolation/experiment/inits --init-glob init_Si_1.5_*.xyz --n-trials 100 --n-seeds 1 --n-inits 5 --n-jobs 4 --devices cuda:0,cuda:1,cuda:2,cuda:3 --study-name glass_entropy_v1_15ood --storage research/hpo/glass_entropy_v1_15ood.db)",
+      "Bash(tee research/hpo/glass_entropy_v1_15ood.log)",
+      "Bash(pkill -f \"hpo_entropy_v1.py\")",
+      "Bash(mkdir -p /tmp/coord_test_inits /tmp/coord_test_refs)",
+      "Bash(cp /home/dskoda/prj/glass-epsr/research/density_extrapolation/experiment/inits/init_Si_1.5_0.xyz /tmp/coord_test_inits/Si_1.5_0.xyz)",
+      "Bash(cp /home/dskoda/prj/glass-epsr/research/density_extrapolation/results/generated/cond/density_1.5/reference/init_Si_1.5_0.xyz /tmp/coord_test_refs/Si_1.5_0.xyz)"
     ]
   }
 }

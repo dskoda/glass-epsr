@@ -124,6 +124,29 @@ class ExperimentConfig:
     entropy_t_gate: float = 1.0
     entropy_r_cut: float = 4.0
 
+    # Differentiable coordination-number guidance.
+    # Disabled by default. Three composable penalty modes are evaluated
+    # on a smooth (cosine-switched) per-atom coord:
+    #   low  hinge: softplus(k_low  * (n_low  - c)) / k_low      (set w_low > 0)
+    #   target:    sigma^2 * (sqrt(1 + ((c - n_target)/sigma)^2) - 1)
+    #   high hinge: softplus(k_high * (c - n_high)) / k_high     (set w_high > 0)
+    coord_guidance: bool = False
+    coord_lambda: float = 1.0
+    coord_schedule: str = "constant"
+    coord_t_gate: float = 1.0
+    coord_r_cut: float = 2.85
+    coord_smear: float = 0.30
+    coord_clamp: float = 10.0
+    coord_n_target: float = 4.0
+    coord_sigma_target: float = 0.5
+    coord_w_target: float = 1.0
+    coord_n_low: float = 4.0
+    coord_w_low: float = 0.0
+    coord_k_low: float = 4.0
+    coord_n_high: float = 7.0
+    coord_w_high: float = 0.0
+    coord_k_high: float = 4.0
+
     sa_n_steps: int = 0
     sa_T0: float = 1e-2
     sa_T_end: float = 1e-5
