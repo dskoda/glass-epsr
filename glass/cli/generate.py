@@ -56,9 +56,13 @@ EXAMPLES:
   # Use specific checkpoint
   glass generate ./my_experiment/ --inits ./inits/ --checkpoint last.ckpt
 
-  # Conditional generation with PDF guidance
+  # Conditional generation with PDF guidance (averaged over all refs)
   glass generate ./my_experiment/ --inits ./inits/ \\
       --guidance-type pdf --ref-path ./reference/
+
+  # Conditional generation from a single reference structure
+  glass generate ./my_experiment/ --inits ./inits/ \\
+      --guidance-type pdf --ref-structure ./reference/Si_2.5_00.xyz
 
   # Multiple runs per structure
   glass generate ./my_experiment/ --inits ./inits/ --n-runs 20
@@ -144,7 +148,13 @@ GUIDANCE TYPES:
     "--ref-path",
     type=click.Path(),
     default=None,
-    help="Directory of reference structures for computational guidance.",
+    help="Directory of reference structures; all *.xyz files are averaged into one target.",
+)
+@click.option(
+    "--ref-structure",
+    type=click.Path(),
+    default=None,
+    help="Single reference structure file (.xyz) for computational guidance.",
 )
 @click.option(
     "--exp-data",
@@ -476,6 +486,7 @@ def generate(
     save_traj,
     guidance_type,
     ref_path,
+    ref_structure,
     exp_data,
     rho,
     spec_model_path,
@@ -535,9 +546,19 @@ def generate(
     # Set CUDA memory config
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    # Load experiment
+    # Load experiment.  If the experiment has no config.yaml, fall back to
+    # the built-in ExperimentConfig defaults (mirrors glass/default_params.yaml)
+    # so that `glass generate` works on any experiment dir that just contains
+    # checkpoints/ and inits/.
     experiment = Experiment(experiment_path)
-    config = experiment.load_config()
+    if experiment.config_path.exists():
+        config = experiment.load_config()
+    else:
+        from glass.experiment import ExperimentConfig
+        click.echo(
+            f"No config.yaml in {experiment.root}; using built-in defaults."
+        )
+        config = ExperimentConfig()
 
     # Apply params-file overrides (between experiment config and explicit CLI flags)
     if params_file:
@@ -841,14 +862,17 @@ def generate(
             spec_model_path=spec_model_path,
         )
         
-        # Validate ref_path vs exp_data
-        if not ref_path and not exp_data:
+        # Validate reference source options
+        n_ref_sources = sum(bool(x) for x in [ref_path, ref_structure, exp_data])
+        if n_ref_sources == 0:
             raise click.ClickException(
-                "Conditional generation requires --ref-path or --exp-data"
+                "Conditional generation requires --ref-path, --ref-structure, or --exp-data"
             )
-        if ref_path and exp_data:
-            raise click.ClickException("--ref-path and --exp-data are mutually exclusive")
-    
+        if n_ref_sources > 1:
+            raise click.ClickException(
+                "--ref-path, --ref-structure, and --exp-data are mutually exclusive"
+            )
+
     # Load experimental target if specified
     exp_target_y = None
     if exp_data:
@@ -864,16 +888,43 @@ def generate(
             device=device,
         )
         click.echo(f"Loaded experimental target from {exp_data}")
-    
+
+    # Pre-compute averaged target from all structures in --ref-path
+    ref_path_target_y = None
+    if ref_path and guidance_type:
+        import glob as _glob
+        ref_files = sorted(_glob.glob(os.path.join(ref_path, "*.xyz")))
+        if not ref_files:
+            raise click.ClickException(f"No .xyz files found in --ref-path {ref_path}")
+        click.echo(f"Computing averaged target from {len(ref_files)} reference structures in {ref_path}")
+        targets = []
+        for rf in ref_files:
+            ref_atoms = read(rf, "-1")
+            targets.append(
+                compute_target_from_reference(ref_atoms, guidance_model, guidance_type, cutoff, device)
+            )
+        ref_path_target_y = torch.stack(targets).mean(dim=0)
+
+    # Pre-compute target from single --ref-structure file
+    ref_structure_target_y = None
+    if ref_structure and guidance_type:
+        if not os.path.exists(ref_structure):
+            raise click.ClickException(f"--ref-structure file not found: {ref_structure}")
+        click.echo(f"Computing target from reference structure: {ref_structure}")
+        ref_atoms = read(ref_structure, "-1")
+        ref_structure_target_y = compute_target_from_reference(
+            ref_atoms, guidance_model, guidance_type, cutoff, device
+        )
+
     # Get initial structures
     init_files = experiment.get_init_files(inits)
     if not init_files:
         raise click.ClickException(f"No .xyz files found in {inits}")
     click.echo(f"Found {len(init_files)} initial structures")
-    
+
     # Time steps (power-law; rho=1.0 == linspace)
     ts_torch = power_law_ts(tmin, tmax, tstep, rho=t_schedule_rho, device=device)
-    
+
     # Progress callback for denoising
     def progress_callback(step, t, p_norm, l_norm=None, target_norm=None):
         if l_norm is not None:
@@ -881,29 +932,19 @@ def generate(
                 f"    p={p_norm:.3f}  l={l_norm:.3f}  tgt={target_norm:.4f}",
                 err=True,
             )
-    
+
     # Process each initial structure
     for init_file in init_files:
         init_atoms = read(init_file, "-1")
         sub_id = os.path.basename(init_file).replace(".xyz", "")
         click.echo(f"\nProcessing: {sub_id}")
-        
-        # Get reference target if needed
+
+        # Select pre-computed target for this structure
         target_y = None
-        if ref_path:
-            ref_file = os.path.join(ref_path, f"{sub_id}.xyz")
-            if not os.path.exists(ref_file):
-                click.echo(f"  Warning: reference {ref_file} not found, skipping")
-                continue
-            ref_atoms = read(ref_file, "-1")
-            if not (np.all(init_atoms.pbc) and np.all(ref_atoms.pbc)):
-                raise click.ClickException("PBC must be True for both init and ref")
-            if not np.allclose(init_atoms.get_cell(), ref_atoms.get_cell(), atol=1e-5):
-                raise click.ClickException("Init and ref cells must match")
-            
-            target_y = compute_target_from_reference(
-                ref_atoms, guidance_model, guidance_type, cutoff, device
-            )
+        if ref_path_target_y is not None:
+            target_y = ref_path_target_y
+        elif ref_structure_target_y is not None:
+            target_y = ref_structure_target_y
         elif exp_data:
             target_y = exp_target_y
         
@@ -959,6 +1000,7 @@ def generate(
             "guidance_type": guidance_type,
             "rho": rho if guidance_type else None,
             "ref_path": ref_path,
+            "ref_structure": ref_structure,
             "exp_data": exp_data,
             "tmin": tmin, "tmax": tmax, "tstep": tstep,
             "t_schedule_rho": t_schedule_rho,
