@@ -388,7 +388,7 @@ GUIDANCE TYPES:
     "--coord-r-cut",
     type=float,
     default=None,
-    help="[coord] Cutoff radius for soft neighbour count (Å); typically the first PDF minimum.",
+    help="[coord] Cutoff radius for soft neighbour count (Å). If omitted and --ref-path is given, auto-derived from the first minimum of the reference PDF.",
 )
 @click.option(
     "--coord-smear",
@@ -465,6 +465,21 @@ GUIDANCE TYPES:
          "Each restart starts from the previous pass output (same cell/species/guidance).",
 )
 @click.option(
+    "--uncond-prepass/--no-uncond-prepass",
+    default=None,
+    help="Run one unconditional denoising pass on the init structure before "
+         "the conditional passes. Only applies when guidance_type is set. "
+         "Default: enabled.",
+)
+@click.option(
+    "--lambda-prior",
+    type=float,
+    default=None,
+    help="Scale factor applied to the prior score network output at every SDE step. "
+         "1.0 (default) = unmodified prior. 0.0 turns off the prior entirely, "
+         "leaving only guidance terms. Values > 1 amplify the prior.",
+)
+@click.option(
     "--params",
     "params_file",
     type=click.Path(exists=True),
@@ -537,6 +552,8 @@ def generate(
     coord_w_high,
     coord_k_high,
     n_restart,
+    uncond_prepass,
+    lambda_prior,
     params_file,
 ):
     """Generate structures using trained score model."""
@@ -656,7 +673,7 @@ def generate(
     )
     coord_r_cut = (
         coord_r_cut if coord_r_cut is not None
-        else getattr(config, "coord_r_cut", 2.85)
+        else getattr(config, "coord_r_cut", None)
     )
     coord_smear = (
         coord_smear if coord_smear is not None
@@ -704,7 +721,15 @@ def generate(
     )
     n_restart = n_restart if n_restart is not None else getattr(config, "n_restart", 1)
     n_restart = max(1, int(n_restart))
-    
+    uncond_prepass = (
+        uncond_prepass if uncond_prepass is not None
+        else getattr(config, "uncond_prepass", True)
+    )
+    lambda_prior = (
+        lambda_prior if lambda_prior is not None
+        else getattr(config, "lambda_prior", 1.0)
+    )
+
     # Resolve output directory
     if outdir is None:
         outdir = experiment.outputs_dir
@@ -763,6 +788,36 @@ def generate(
     coord_guidance_fn = None
     coord_schedule_fn = None
     if coord_guidance:
+        if coord_r_cut is None:
+            if not ref_path:
+                raise click.ClickException(
+                    "--coord-r-cut not specified and could not be auto-derived: "
+                    "either pass --coord-r-cut, set coord_r_cut in config.yaml, "
+                    "or provide --ref-path so the cutoff can be taken from the "
+                    "reference PDF first minimum."
+                )
+            import glob as _glob
+            from glass.metrics.structural import compute_pdf
+            cut_files = sorted(_glob.glob(os.path.join(ref_path, "*.xyz")))
+            if not cut_files:
+                raise click.ClickException(
+                    f"--coord-r-cut auto-derivation failed: no .xyz files in {ref_path}"
+                )
+            mins = []
+            for rf in cut_files:
+                pdf = compute_pdf(read(rf, "-1"))
+                if pdf.first_minima_position is not None:
+                    mins.append(pdf.first_minima_position)
+            if not mins:
+                raise click.ClickException(
+                    "--coord-r-cut auto-derivation failed: no first PDF minimum "
+                    f"detected in any reference structure under {ref_path}."
+                )
+            coord_r_cut = float(np.mean(mins))
+            click.echo(
+                f"Auto-derived coord_r_cut from {len(mins)} reference PDFs: "
+                f"{coord_r_cut:.3f} Å"
+            )
         click.echo(
             f"Coord guidance: schedule={coord_schedule} "
             f"lambda0={coord_lambda} t_gate={coord_t_gate} "
@@ -925,14 +980,6 @@ def generate(
     # Time steps (power-law; rho=1.0 == linspace)
     ts_torch = power_law_ts(tmin, tmax, tstep, rho=t_schedule_rho, device=device)
 
-    # Progress callback for denoising
-    def progress_callback(step, t, p_norm, l_norm=None, target_norm=None):
-        if l_norm is not None:
-            click.echo(
-                f"    p={p_norm:.3f}  l={l_norm:.3f}  tgt={target_norm:.4f}",
-                err=True,
-            )
-
     # Process each initial structure
     for init_file in init_files:
         init_atoms = read(init_file, "-1")
@@ -1023,6 +1070,7 @@ def generate(
             "checkpoint": str(ckpt_path),
             "n_runs": n_runs,
             "n_restart": n_restart,
+            "uncond_prepass": bool(uncond_prepass) if guidance_type else None,
             "entropy_guidance": bool(entropy_guidance),
             "entropy_lambda": entropy_lambda if entropy_guidance else None,
             "entropy_schedule": entropy_schedule if entropy_guidance else None,
@@ -1044,6 +1092,7 @@ def generate(
             "coord_n_high": coord_n_high if coord_guidance else None,
             "coord_w_high": coord_w_high if coord_guidance else None,
             "coord_k_high": coord_k_high if coord_guidance else None,
+            "lambda_prior": lambda_prior,
             "init_file": init_file,
             "sub_id": sub_id,
         }
@@ -1051,18 +1100,79 @@ def generate(
             _json.dump(params_record, _pf, indent=2, default=str)
 
         # Prior function wrapper
-        def prior_fn(sp, p, c, t, co, _sn=score_net, _df=diffuser):
-            return compute_prior_score(sp, p, c, t, co, _sn, _df)
+        _lp = float(lambda_prior)
+        def prior_fn(sp, p, c, t, co, _sn=score_net, _df=diffuser, _lp=_lp):
+            return _lp * compute_prior_score(sp, p, c, t, co, _sn, _df)
         
         for i in range(n_runs):
             import copy
             species, pos, cell = atoms_to_device(copy.deepcopy(init_atoms), device)
             cell_np = cell.detach().cpu().numpy()
-            
+
             pos_current = pos
             traj = None
+
+            # Optional unconditional prepass: a single full denoising pass with
+            # no likelihood guidance to give the conditional restarts a more
+            # physical starting point than the raw init.
+            if guidance_type and uncond_prepass:
+                pre_pbar = tqdm(
+                    total=len(ts_torch),
+                    desc=f"  run {i+1}/{n_runs} uncond-prepass ",
+                    unit="step",
+                    leave=False,
+                    dynamic_ncols=True,
+                )
+
+                def pre_progress(step, t, p_norm, _pbar=pre_pbar, **_kw):
+                    _pbar.update(1)
+                    _pbar.set_postfix(p=f"{p_norm:.3f}")
+
+                _, pos_current = denoise_by_sde(
+                    species=species,
+                    pos=pos_current,
+                    cell=cell,
+                    cutoff=cutoff,
+                    score_fn=prior_fn,
+                    likelihood_fn=None,
+                    ts=ts_torch,
+                    diffuser=diffuser,
+                    save_traj=False,
+                    progress_fn=pre_progress,
+                    tersoff_guidance=tersoff_guidance_fn,
+                    tersoff_schedule=tersoff_schedule_fn,
+                    tersoff_tweedie=tersoff_tweedie,
+                    n_corr=n_corr,
+                    corr_step_size=corr_step_size,
+                    corr_use_tersoff=corr_use_tersoff,
+                    corr_t_gate=corr_t_gate,
+                    anneal_fn=None,
+                    entropy_guidance=entropy_guidance_fn,
+                    entropy_schedule=entropy_schedule_fn,
+                    coord_guidance=coord_guidance_fn,
+                    coord_schedule=coord_schedule_fn,
+                )
+                pre_pbar.close()
+
             for _restart in range(n_restart):
                 last_restart = (_restart == n_restart - 1)
+                total_steps = len(ts_torch)
+                restart_label = f"restart {_restart+1}/{n_restart} " if n_restart > 1 else ""
+                pbar = tqdm(
+                    total=total_steps,
+                    desc=f"  run {i+1}/{n_runs} {restart_label}",
+                    unit="step",
+                    leave=False,
+                    dynamic_ncols=True,
+                )
+
+                def progress_callback(step, t, p_norm, l_norm=None, target_norm=None, _pbar=pbar, **_kw):
+                    _pbar.update(1)
+                    if l_norm is not None:
+                        _pbar.set_postfix(p=f"{p_norm:.3f}", l=f"{l_norm:.3f}", tgt=f"{target_norm:.4f}")
+                    else:
+                        _pbar.set_postfix(p=f"{p_norm:.3f}")
+
                 traj, pos_current = denoise_by_sde(
                     species=species,
                     pos=pos_current,
@@ -1073,7 +1183,7 @@ def generate(
                     ts=ts_torch,
                     diffuser=diffuser,
                     save_traj=save_traj and last_restart,
-                    progress_fn=progress_callback if (guidance_type and last_restart) else None,
+                    progress_fn=progress_callback,
                     tersoff_guidance=tersoff_guidance_fn,
                     tersoff_schedule=tersoff_schedule_fn,
                     tersoff_tweedie=tersoff_tweedie,
@@ -1087,6 +1197,7 @@ def generate(
                     coord_guidance=coord_guidance_fn,
                     coord_schedule=coord_schedule_fn,
                 )
+                pbar.close()
             final_pos = pos_current
             
             if save_traj:

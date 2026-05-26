@@ -92,7 +92,12 @@ class TorchTersoff:
         P = int(i_idx.shape[0])
 
         if P == 0:
-            return torch.zeros((), dtype=dtype, device=device)
+            # Keep the autograd connection to `positions` so that callers
+            # taking ∇E with respect to positions don't trip
+            # "element 0 of tensors does not require grad" when the
+            # neighbour list happens to be empty (e.g. low-density
+            # configurations at high noise).
+            return positions.sum() * 0.0
 
         # Sort pairs by source atom i so pairs with the same i are
         # contiguous — this lets us build the padded (N_src, n_max)

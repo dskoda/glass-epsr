@@ -99,6 +99,10 @@ class ExperimentConfig:
     tersoff_t_gate: float = 0.50
     tersoff_clamp: float = 10.0
 
+    # Scale factor on the prior score at each SDE step.
+    # 1.0 = unmodified prior; 0.0 turns off the prior entirely.
+    lambda_prior: float = 1.0
+
     # Sampler refinements (v6 fixed params, carried from v5 best).
     # n_corr=2, corr_step_size=0.44, corr_t_gate=0.464, t_schedule_rho=1.01
     n_corr: int = 2
@@ -115,6 +119,11 @@ class ExperimentConfig:
     # Each pass starts from the previous output (same cell/species/guidance).
     # SA tail runs only on the final pass.
     n_restart: int = 3
+
+    # Optional unconditional denoising prepass before conditional restarts.
+    # Gives the conditional passes a more physical starting point than the
+    # raw init structure. Only applied when a guidance_type is set.
+    uncond_prepass: bool = True
 
     # Structural-entropy guidance (ACSF variance, Cliffe et al. 2017).
     # Disabled by default; enable per-run via CLI for ablation studies.
@@ -134,7 +143,7 @@ class ExperimentConfig:
     coord_lambda: float = 1.0
     coord_schedule: str = "constant"
     coord_t_gate: float = 1.0
-    coord_r_cut: float = 2.85
+    coord_r_cut: Optional[float] = None
     coord_smear: float = 0.30
     coord_clamp: float = 10.0
     coord_n_target: float = 4.0

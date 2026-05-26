@@ -107,7 +107,6 @@
       "Bash(echo \"Launched PID=$!\")",
       "Bash(ps -o pid,stat,etime,rss,cmd -p 4147700)",
       "Bash(ps -o pid,stat,etime -p 4147700)",
-
       "Bash(KMP_DUPLICATE_LIB_OK=TRUE nohup python scripts/hpo_phys_v5.py research/density_extrapolation/experiment/ --ref-dir research/density_extrapolation/results/generated/cond/density_1.5/reference --init-dir research/density_extrapolation/experiment/inits --init-glob init_Si_1.5_*.xyz --n-trials 200 --n-seeds 1 --n-inits 5 --n-jobs 4 --devices cuda:0,cuda:1,cuda:2,cuda:3 --study-name glass_phys_v5_15ood --storage research/hpo/glass_phys_v5_15ood.db)",
       "Bash(echo \"PID=$!\")",
       "Bash(ps -p 2279077 -o pid,stat,etime)",
@@ -121,7 +120,14 @@
       "Bash(pkill -f \"hpo_entropy_v1.py\")",
       "Bash(mkdir -p /tmp/coord_test_inits /tmp/coord_test_refs)",
       "Bash(cp /home/dskoda/prj/glass-epsr/research/density_extrapolation/experiment/inits/init_Si_1.5_0.xyz /tmp/coord_test_inits/Si_1.5_0.xyz)",
-      "Bash(cp /home/dskoda/prj/glass-epsr/research/density_extrapolation/results/generated/cond/density_1.5/reference/init_Si_1.5_0.xyz /tmp/coord_test_refs/Si_1.5_0.xyz)"
+      "Bash(cp /home/dskoda/prj/glass-epsr/research/density_extrapolation/results/generated/cond/density_1.5/reference/init_Si_1.5_0.xyz /tmp/coord_test_refs/Si_1.5_0.xyz)",
+      "Bash(chmod +x /home/dskoda/prj/glass-epsr/research/03-paper-silicon/pipeline/07_paper_experiments.sh)",
+      "Bash(bash -n /home/dskoda/prj/glass-epsr/research/03-paper-silicon/pipeline/07_paper_experiments.sh)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE CUDA_VISIBLE_DEVICES=0 python *)",
+      "Bash(mkdir -p /home/dskoda/prj/glass-epsr/research/lammps/melt_1.5)",
+      "Bash(mkdir -p /home/dskoda/prj/glass-epsr/research/density_extrapolation/inits/liquid_density_1.5)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE mpirun -np 8 /opt/research/lammps/29Aug2024-gpu/bin/lmp -in in.melt -log log.melt)",
+      "Bash(awk '{print $1, $3, $5}')"
     ]
   }
 }
