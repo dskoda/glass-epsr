@@ -43,6 +43,11 @@ from glass.potentials.tersoff.cli import energy as _tersoff_energy
 glass.add_command(_tersoff_md, name="md")
 glass.add_command(_tersoff_energy, name="energy")
 
+# Register CRN generation command
+from glass.cli.crn import crn
+
+glass.add_command(crn)
+
 
 if __name__ == "__main__":
     glass()
