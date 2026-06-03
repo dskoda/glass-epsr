@@ -142,6 +142,9 @@ def md(
     _log()
     dyn.run(steps)
     traj.close()
+    out_xyz = str(output_path).replace(".traj", "") + ".xyz"
+    write(out_xyz, traj, format="extxyz")
+
     click.echo(f"Wrote trajectory to {output_path}")
 
 
