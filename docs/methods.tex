@@ -251,6 +251,77 @@ $|t_{i+1}-t_i|$ grows as $i$ increases, concentrating integration points at
 large $t$ where the learned score is weak, and taking larger steps at small
 $t$ where the corrector dominates.
 
+\subsection{Restart passes and inter-restart relaxation}
+\label{sec:restart}
+
+A single integration of the reverse SDE resolves local bonding but can leave
+residual long-range frustration, particularly at densities away from the
+training distribution. We therefore optionally run $n_{\mathrm{restart}}$
+back-to-back denoising passes: each pass integrates the full
+$t_{\max}\!\to\!t_{\min}$ trajectory starting from the output of the previous
+pass (with the same cell, species, and guidance terms). Re-noising the
+configuration to $t_{\max}$ lets the score network re-resolve topology while
+inheriting the locally bonded geometry built by earlier passes. When
+feature-matching guidance is active, the restart sequence is optionally
+preceded by a single \emph{unconditional prepass}, an SDE integration with the
+likelihood channel disabled, which supplies the conditional restarts with a
+more physical starting point than the raw initial packing.
+
+Between passes we optionally interleave two physics-based relaxations on the
+Tersoff potential-energy surface, both acting on the current configuration
+$\mathbf{x}$ and leaving the SDE driver of Sec.~\ref{sec:sampler} unchanged.
+
+\paragraph{Geometry optimization.}
+A FIRE minimization~\cite{bitzek2006structural} drives $\mathbf{x}$ toward a
+local minimum of $E(\mathbf{x};\mathbf{L})$, run after every pass to a
+maximum-force tolerance $f_{\max}$ or a step budget.
+
+\paragraph{Finite-temperature thermalization.}
+Alternatively (or additionally), a short canonical (NVT) molecular-dynamics
+segment equilibrates the structure at temperature $T$ before the next pass. We
+integrate Langevin dynamics
+\begin{equation}
+    \mathrm{d}\mathbf{p}
+    = -\nabla_{\mathbf{x}} E\,\mathrm{d}t
+      - \gamma\,\mathbf{p}\,\mathrm{d}t
+      + \sqrt{2\gamma m\,k_{\mathrm{B}}T}\;\mathrm{d}\mathbf{w},
+    \label{eq:langevin-md}
+\end{equation}
+with friction $\gamma$ and velocities initialized from a Maxwell--Boltzmann
+distribution at $T$. Unlike the simulated-annealing tail (which mixes a
+clipped, $N$-normalized gradient with decaying noise on a fictitious schedule),
+this segment is a genuine constant-temperature trajectory on the unmodified
+Tersoff forces, integrated with a physical timestep. We use $T=600$~K, a
+$1$~fs timestep for $10^{3}$ steps ($1$~ps), and $\gamma=10^{-2}$~fs$^{-1}$ by
+default. Crucially, this thermalization is applied after the prepass and after
+each \emph{intermediate} restart but \emph{not} after the final pass, so the
+returned configuration remains the denoised result rather than a thermally
+displaced snapshot.
+
+\paragraph{Pre-MD declashing.}
+Denoised and prepass configurations occasionally contain a near-coincident
+atom pair (sub-\AA{} separation), at which the Tersoff energy and its gradient
+overflow to non-finite values; integrating Eq.~\eqref{eq:langevin-md} from such
+a state immediately ejects atoms and corrupts the trajectory. Within the SDE
+this is benign, because the next pass re-noises the configuration before the
+network evaluates it at low noise, but the MD reads the geometry directly. We
+therefore precede the MD by a purely geometric \emph{declashing} step that
+iteratively displaces every pair closer than $d_{\min}$ apart along their
+minimum-image vector,
+\begin{equation}
+    \mathbf{x}_i \leftarrow \mathbf{x}_i
+      + \tfrac{1}{2}\,(d_{\min}-r_{ij})\,\hat{\mathbf{r}}_{ij},
+    \qquad
+    \mathbf{x}_j \leftarrow \mathbf{x}_j
+      - \tfrac{1}{2}\,(d_{\min}-r_{ij})\,\hat{\mathbf{r}}_{ij},
+    \label{eq:declash}
+\end{equation}
+until $\min_{i\neq j} r_{ij}\ge d_{\min}$ (default $d_{\min}=1.5$~\AA). Because
+Eq.~\eqref{eq:declash} evaluates no potential, it is robust even when the
+forces are already non-finite; a short FIRE minimization then drains the
+remaining close-contact strain before MD begins. A FIRE relaxation alone is
+insufficient, as it cannot make progress from a non-finite gradient.
+
 \subsection{Hyperparameter optimization}
 \label{sec:hpo}
 

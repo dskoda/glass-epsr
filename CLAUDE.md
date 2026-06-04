@@ -17,6 +17,7 @@ A single Python package `glass` (defined by `./pyproject.toml`) for generative m
    - `sampling.denoise_by_sde` — unified reverse-SDE driver (uncond + cond)
    - `schedules.power_law_ts` — non-linear t trajectory
    - `annealing.simulated_anneal` / `make_anneal_fn` — Tersoff-based post-relaxation
+   - `annealing.nvt_md` / `make_nvt_md_fn` — finite-T NVT Langevin MD thermalisation between restarts
 
 3. **`glass.potentials.tersoff`** — PyTorch reimplementation of LAMMPS-style Tersoff potential
    - Single-species Si, autograd-based forces
@@ -55,7 +56,7 @@ KMP_DUPLICATE_LIB_OK=TRUE pytest -v
 │   ├── diffusion/
 │   │   ├── sampling.py                 # denoise_by_sde (unified loop)
 │   │   ├── schedules.py                # power_law_ts
-│   │   └── annealing.py                # SA tail on Tersoff PES
+│   │   └── annealing.py                # SA tail, FIRE relax, NVT-MD on Tersoff PES
 │   ├── experiment.py                   # ExperimentConfig dataclass + paths
 │   ├── lit/                            # Lightning training + denoising
 │   │   ├── datamodules/
@@ -147,6 +148,11 @@ glass generate ./my_experiment --inits ./inits/ \
 glass generate ./my_experiment --inits ./inits/ \
     --guidance-type xrd --ref-path ./reference/ \
     --element-names Si --rho 5
+
+# NVT-MD thermalisation between restarts (600 K, 1 ps default)
+glass generate ./my_experiment --inits ./inits/ \
+    --guidance-type pdf --ref-path ./reference/ \
+    --nvt-md --nvt-md-temperature 600 --nvt-md-n-steps 1000
 ```
 
 ### Metrics
@@ -206,6 +212,38 @@ After the predictor, an optional Langevin corrector runs `n_corr` inner
 steps (gated off when `t > corr_t_gate · t_max`), and an optional SA tail
 runs on the Tersoff PES after the loop exits.
 
+**Inter-restart post-processing (orchestrated in `generate.py`, not in
+`denoise_by_sde`).** The restart loop and the optional unconditional prepass
+live in `glass/cli/generate.py`. Between passes, two Tersoff-based relaxations
+can run on `pos_current`:
+
+- `--tersoff-relax` — FIRE geometry optimisation (`make_relax_fn`) after
+  *every* restart.
+- `--nvt-md` — finite-T NVT Langevin MD (`make_nvt_md_fn`) after the
+  **unconditional prepass and each *intermediate* restart, but never after the
+  final restart** (the returned structure stays the denoised result, optionally
+  followed by the SA tail). Defaults: 600 K, 1000 steps × 1 fs = 1 ps,
+  `friction=0.01` 1/fs.
+
+  **Pre-MD declash + pre-relax (critical).** Denoised/prepass structures can
+  collapse an atom pair to sub-Å separation (the unconditional prepass can
+  diverge at low noise under strong Tersoff guidance), where the Tersoff energy
+  overflows to **NaN forces**. This is normally masked because the next
+  conditional restart re-adds noise at `tmax`, but MD reads the geometry
+  directly and NaN then propagates into the likelihood's differentiable-PDF
+  autograd, surfacing as `RuntimeError: One of the differentiated Tensors
+  appears to not have been used in the graph` on the *first denoising step after
+  MD*. So `nvt_md` first runs a geometric **declash** (`_declash_atoms`,
+  minimum-image pair separation to `nvt_md_declash_d_min`, default 1.5 Å — no
+  potential evaluated, robust to non-finite forces) then a short FIRE pre-relax
+  (`nvt_md_pre_relax_steps`, default 10). A plain FIRE pre-relax alone cannot
+  recover from NaN forces, which is why the declash must come first.
+
+  MD runs the float64 Tersoff calculator on the generation `--device` (GPU:
+  ~18 s/1000 steps for 216 atoms; CPU: ~90× slower). The CLI shows a tqdm bar
+  per MD call (`nvt-md (post-prepass)`, `nvt-md (post-restart N/M)`) with live
+  temperature.
+
 **Time schedule:** `power_law_ts(tmin, tmax, tstep, rho)` with
 `rho > 1` concentrating steps at low noise (MD-like), `rho < 1` at high
 noise (prior-dominated), `rho = 1` uniform.
@@ -255,6 +293,12 @@ Best trial metrics at ρ=1.5 (cond, 5 inits × 1 seed):
 | `corr_t_gate` | 0.464 | 0.464 | 0.79 | 0.58 | 0.37 |
 | `rho` (guidance) | 416.0 | 416.0 | 737.0 | 240.0 | 35.0 |
 | `sa_n_steps` | 0 | 0 | 0 | 0 | 0 |
+| `nvt_md` | false | — | — | — | — |
+
+`nvt_md` is off by default and not part of any HPO study — it is an opt-in
+post-processing knob (see the inter-restart post-processing notes above). When
+enabled its defaults are 600 K / 1000 steps / 1 fs / `friction=0.01`, with
+`nvt_md_pre_relax_steps=10` and `nvt_md_declash_d_min=1.5`.
 
 **Why these changes matter (v5 → v6):**
 
