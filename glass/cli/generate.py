@@ -8,6 +8,7 @@ from glass.experiment import Experiment
 from glass.lit.datamodules import StructureSpecDataModule
 from glass.lit.modules import LitScoreNet, LitSpecNet
 from glass.diffusion.sampling import denoise_by_sde
+from glass.diffusion.profiler import GuidanceProfiler
 from glass.lit.modules.likelihood import LikelihoodScore
 from glass.lit.modules.guidance import create_guidance_model, load_experimental_data
 from glass.lit.modules.tersoff_guidance import (
@@ -22,7 +23,7 @@ from glass.lit.modules.coord_guidance import (
     CoordinationSchedule,
 )
 from glass.diffusion.schedules import power_law_ts
-from glass.diffusion.annealing import make_anneal_fn
+from glass.diffusion.annealing import make_anneal_fn, make_nvt_md_fn, make_relax_fn
 from glass.utils.atoms import (
     atoms_to_device,
     compute_prior_score,
@@ -330,6 +331,77 @@ GUIDANCE TYPES:
     default=None,
     help="[SA] Per-atom per-step displacement cap (Å).",
 )
+# Tersoff geometry optimisation after each restart
+@click.option(
+    "--tersoff-relax/--no-tersoff-relax",
+    default=False,
+    help="Run FIRE geometry optimisation under the Tersoff potential at the "
+         "end of every restart. Requires Tersoff guidance to be active. "
+         "Drives the structure toward a local energy minimum before the next "
+         "denoising pass. Only Si (single-species) is currently supported.",
+)
+@click.option(
+    "--tersoff-relax-fmax",
+    type=float,
+    default=0.1,
+    show_default=True,
+    help="[relax] FIRE convergence threshold: maximum per-atom force (eV/Å).",
+)
+@click.option(
+    "--tersoff-relax-steps",
+    type=int,
+    default=200,
+    show_default=True,
+    help="[relax] Maximum number of FIRE steps per restart.",
+)
+# NVT molecular-dynamics inter-restart relaxation
+@click.option(
+    "--nvt-md/--no-nvt-md",
+    default=None,
+    help="Run a short NVT Langevin MD on the Tersoff PES after the "
+         "unconditional prepass and after each intermediate restart (never "
+         "after the final restart). Thermalises the structure before the next "
+         "denoising pass. Requires Tersoff guidance; Si single-species only.",
+)
+@click.option(
+    "--nvt-md-temperature",
+    type=float,
+    default=None,
+    help="[NVT-MD] Target temperature in Kelvin.",
+)
+@click.option(
+    "--nvt-md-n-steps",
+    type=int,
+    default=None,
+    help="[NVT-MD] Number of MD steps (1000 steps × 1 fs = 1 ps).",
+)
+@click.option(
+    "--nvt-md-timestep",
+    type=float,
+    default=None,
+    help="[NVT-MD] Integration timestep in fs.",
+)
+@click.option(
+    "--nvt-md-friction",
+    type=float,
+    default=None,
+    help="[NVT-MD] Langevin friction in 1/fs.",
+)
+@click.option(
+    "--nvt-md-pre-relax-steps",
+    type=int,
+    default=None,
+    help="[NVT-MD] FIRE geometry-optimisation steps run before MD to drain "
+         "close-contact forces. 0 disables both declash and pre-relax.",
+)
+@click.option(
+    "--nvt-md-declash-d-min",
+    type=float,
+    default=None,
+    help="[NVT-MD] Minimum pair distance (Å) enforced before the pre-relax. "
+         "Near-coincident denoised atoms overflow Tersoff to NaN; declashing "
+         "separates them so forces are finite.",
+)
 # Structural-entropy (ACSF variance) guidance
 @click.option(
     "--entropy-guidance/--no-entropy-guidance",
@@ -487,6 +559,12 @@ GUIDANCE TYPES:
     help="YAML file with generation hyperparameters to override experiment config. "
          "Only keys present in the file are applied; explicit CLI flags take precedence.",
 )
+@click.option(
+    "--profile-guidance/--no-profile-guidance",
+    default=False,
+    help="Record per-step guidance contribution norms and save to "
+         "<run_outdir>/guidance_profile_run{N}_restart{R}.json.",
+)
 def generate(
     experiment_path,
     inits,
@@ -555,6 +633,17 @@ def generate(
     uncond_prepass,
     lambda_prior,
     params_file,
+    profile_guidance,
+    tersoff_relax,
+    tersoff_relax_fmax,
+    tersoff_relax_steps,
+    nvt_md,
+    nvt_md_temperature,
+    nvt_md_n_steps,
+    nvt_md_timestep,
+    nvt_md_friction,
+    nvt_md_pre_relax_steps,
+    nvt_md_declash_d_min,
 ):
     """Generate structures using trained score model."""
     import ase
@@ -639,6 +728,32 @@ def generate(
     sa_t_end = sa_t_end if sa_t_end is not None else config.sa_T_end
     sa_lr = sa_lr if sa_lr is not None else config.sa_lr
     sa_lr_clamp = sa_lr_clamp if sa_lr_clamp is not None else config.sa_lr_clamp
+    # NVT-MD inter-restart relaxation
+    nvt_md = nvt_md if nvt_md is not None else getattr(config, "nvt_md", False)
+    nvt_md_temperature = (
+        nvt_md_temperature if nvt_md_temperature is not None
+        else getattr(config, "nvt_md_temperature", 600.0)
+    )
+    nvt_md_n_steps = (
+        nvt_md_n_steps if nvt_md_n_steps is not None
+        else getattr(config, "nvt_md_n_steps", 1000)
+    )
+    nvt_md_timestep = (
+        nvt_md_timestep if nvt_md_timestep is not None
+        else getattr(config, "nvt_md_timestep", 1.0)
+    )
+    nvt_md_friction = (
+        nvt_md_friction if nvt_md_friction is not None
+        else getattr(config, "nvt_md_friction", 0.01)
+    )
+    nvt_md_pre_relax_steps = (
+        nvt_md_pre_relax_steps if nvt_md_pre_relax_steps is not None
+        else getattr(config, "nvt_md_pre_relax_steps", 10)
+    )
+    nvt_md_declash_d_min = (
+        nvt_md_declash_d_min if nvt_md_declash_d_min is not None
+        else getattr(config, "nvt_md_declash_d_min", 1.5)
+    )
     # Entropy guidance
     entropy_guidance = (
         entropy_guidance if entropy_guidance is not None
@@ -888,6 +1003,27 @@ def generate(
             lr_clamp=sa_lr_clamp,
         )
 
+    if tersoff_relax:
+        if not tersoff_guidance:
+            raise click.ClickException(
+                "--tersoff-relax requires --tersoff-guidance to be active."
+            )
+        click.echo(
+            f"Tersoff relax: fmax={tersoff_relax_fmax} eV/Å  max_steps={tersoff_relax_steps}"
+        )
+
+    if nvt_md:
+        if not tersoff_guidance:
+            raise click.ClickException(
+                "--nvt-md requires --tersoff-guidance to be active."
+            )
+        click.echo(
+            f"NVT-MD: T={nvt_md_temperature} K  n_steps={nvt_md_n_steps} "
+            f"timestep={nvt_md_timestep} fs  friction={nvt_md_friction} 1/fs "
+            f"pre_relax={nvt_md_pre_relax_steps} declash_d_min={nvt_md_declash_d_min} Å "
+            f"(after prepass + intermediate restarts only)"
+        )
+
     if n_corr and n_corr > 0:
         click.echo(
             f"Corrector: n_corr={n_corr} step_size={corr_step_size} "
@@ -986,6 +1122,31 @@ def generate(
         sub_id = os.path.basename(init_file).replace(".xyz", "")
         click.echo(f"\nProcessing: {sub_id}")
 
+        relax_fn = (
+            make_relax_fn(
+                numbers=init_atoms.numbers,
+                fmax=tersoff_relax_fmax,
+                max_steps=tersoff_relax_steps,
+            )
+            if tersoff_relax
+            else None
+        )
+
+        nvt_md_fn = (
+            make_nvt_md_fn(
+                numbers=init_atoms.numbers,
+                temperature=nvt_md_temperature,
+                n_steps=nvt_md_n_steps,
+                timestep=nvt_md_timestep,
+                friction=nvt_md_friction,
+                pre_relax_steps=nvt_md_pre_relax_steps,
+                declash_d_min=nvt_md_declash_d_min,
+                device=str(device),
+            )
+            if nvt_md
+            else None
+        )
+
         # Select pre-computed target for this structure
         target_y = None
         if ref_path_target_y is not None:
@@ -1067,6 +1228,11 @@ def generate(
             "sa_T_end": sa_t_end if sa_n_steps else None,
             "sa_lr": sa_lr if sa_n_steps else None,
             "sa_lr_clamp": sa_lr_clamp if sa_n_steps else None,
+            "nvt_md": bool(nvt_md),
+            "nvt_md_temperature": nvt_md_temperature if nvt_md else None,
+            "nvt_md_n_steps": nvt_md_n_steps if nvt_md else None,
+            "nvt_md_timestep": nvt_md_timestep if nvt_md else None,
+            "nvt_md_friction": nvt_md_friction if nvt_md else None,
             "checkpoint": str(ckpt_path),
             "n_runs": n_runs,
             "n_restart": n_restart,
@@ -1112,6 +1278,26 @@ def generate(
             pos_current = pos
             traj = None
 
+            def run_nvt_md(p, label):
+                """Run the NVT-MD thermalisation with a tqdm bar like denoising."""
+                md_pbar = tqdm(
+                    total=nvt_md_n_steps,
+                    desc=f"  run {i+1}/{n_runs} {label}",
+                    unit="step",
+                    leave=False,
+                    dynamic_ncols=True,
+                )
+
+                def md_progress(step, T, _pbar=md_pbar):
+                    _pbar.n = min(step, nvt_md_n_steps)
+                    _pbar.set_postfix(T=f"{T:.0f}K")
+                    _pbar.refresh()
+
+                out = nvt_md_fn(p, cell, species, progress_fn=md_progress).to(p.device)
+                md_pbar.n = nvt_md_n_steps
+                md_pbar.close()
+                return out
+
             # Optional unconditional prepass: a single full denoising pass with
             # no likelihood guidance to give the conditional restarts a more
             # physical starting point than the raw init.
@@ -1154,6 +1340,10 @@ def generate(
                 )
                 pre_pbar.close()
 
+                # Thermalise the prepass output before the conditional restarts.
+                if nvt_md_fn is not None:
+                    pos_current = run_nvt_md(pos_current, "nvt-md (post-prepass) ")
+
             for _restart in range(n_restart):
                 last_restart = (_restart == n_restart - 1)
                 total_steps = len(ts_torch)
@@ -1172,6 +1362,8 @@ def generate(
                         _pbar.set_postfix(p=f"{p_norm:.3f}", l=f"{l_norm:.3f}", tgt=f"{target_norm:.4f}")
                     else:
                         _pbar.set_postfix(p=f"{p_norm:.3f}")
+
+                run_profiler = GuidanceProfiler() if profile_guidance else None
 
                 traj, pos_current = denoise_by_sde(
                     species=species,
@@ -1196,8 +1388,26 @@ def generate(
                     entropy_schedule=entropy_schedule_fn,
                     coord_guidance=coord_guidance_fn,
                     coord_schedule=coord_schedule_fn,
+                    profiler=run_profiler,
                 )
                 pbar.close()
+
+                if relax_fn is not None:
+                    pos_current = relax_fn(pos_current, cell, species).to(pos_current.device)
+
+                # NVT MD thermalisation between passes — skip after the final
+                # restart so the returned structure is the denoised result.
+                if nvt_md_fn is not None and not last_restart:
+                    pos_current = run_nvt_md(
+                        pos_current, f"nvt-md (post-restart {_restart+1}/{n_restart}) "
+                    )
+
+                if run_profiler is not None:
+                    profile_path = os.path.join(
+                        run_outdir, f"{i:02}_guidance_profile_restart{_restart}.json"
+                    )
+                    run_profiler.save_json(profile_path)
+
             final_pos = pos_current
             
             if save_traj:

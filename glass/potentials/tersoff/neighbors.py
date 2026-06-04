@@ -240,6 +240,52 @@ def _build_neighbors_cell_list(
     return i_out, j_out, shift_out
 
 
+def wrap_positions(
+    positions: torch.Tensor,
+    cell: torch.Tensor,
+    pbc,
+) -> torch.Tensor:
+    """Translate every atom into the primitive cell along PBC directions.
+
+    Returns ``positions`` shifted by an integer number of lattice vectors so
+    that the fractional coordinates lie in ``[0, 1)`` along each periodic
+    axis. This is a no-op for non-periodic directions.
+
+    Why this matters: ``build_neighbors`` only enumerates the ±1 periodic
+    image shells, which covers the full interaction sphere *only when every
+    atom already lies inside the primitive cell*. The reverse-SDE sampler
+    never re-wraps its positions, so over many steps atoms diffuse across the
+    cell boundary and accumulate "unwrapped" coordinates several cell-lengths
+    out. Once that happens the ±1 shells can no longer reach an atom's true
+    periodic neighbours and the enumerated pair list silently collapses
+    toward zero — yielding a spurious zero energy even though the structure
+    is physically unchanged and all coordinates are finite.
+
+    The wrap is a translation by an integer number of lattice vectors, so it
+    leaves the (PBC-periodic) Tersoff energy and its gradient invariant. The
+    integer shift is detached from the graph (``floor`` is piecewise-constant
+    and carries no gradient), so ``d(wrapped)/d(positions) = I`` and autograd
+    forces are unaffected.
+    """
+    pbc = tuple(bool(p) for p in pbc)
+    if not any(pbc):
+        return positions
+
+    cell_t = cell.to(dtype=positions.dtype, device=positions.device)
+    cell_inv = torch.linalg.inv(cell_t)
+    frac = positions @ cell_inv
+    # Integer count of lattice vectors to remove per atom/axis. Detached:
+    # floor() has zero gradient a.e., and detaching makes the no-gradient
+    # contract explicit so the wrap is transparent to autograd.
+    n_shift = torch.floor(frac).detach()
+    # Only wrap along periodic axes; leave open directions untouched.
+    axis_mask = torch.tensor(
+        pbc, dtype=positions.dtype, device=positions.device
+    )
+    n_shift = n_shift * axis_mask
+    return positions - n_shift @ cell_t
+
+
 def build_neighbors(
     positions: torch.Tensor,
     cell: torch.Tensor,

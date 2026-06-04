@@ -220,6 +220,7 @@ class StructuralMetrics:
         composition: Chemical formula
         cell: Unit cell parameters [a, b, c, alpha, beta, gamma]
         density: Number density (atoms/Å³)
+        mass_density: Mass density (g/cm³)
         pdf: PDF metrics
         adf: ADF metrics
         coordination: Coordination metrics
@@ -232,6 +233,7 @@ class StructuralMetrics:
     composition: str
     cell: List[float]
     density: float
+    mass_density: float
     pdf: 'PDFMetrics'
     adf: 'ADFMetrics'
     coordination: 'CoordinationMetrics'
@@ -251,6 +253,7 @@ class StructuralMetrics:
             "composition": self.composition,
             "cell": self.cell,
             "density": self.density,
+            "mass_density": self.mass_density,
             "pdf": self.pdf.to_dict(),
             "adf": self.adf.to_dict(),
             "coordination": self.coordination.to_dict(),

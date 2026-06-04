@@ -158,7 +158,7 @@ class TersoffSchedule:
         lambda_0: float = 0.05,
         tmax: float = 1.0,
         t_gate: float = 0.3,
-        k: float = 20.0,
+        k: float = 100.0,
     ) -> None:
         if schedule not in ("constant", "linear", "sigmoid"):
             raise ValueError(

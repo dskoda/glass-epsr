@@ -162,6 +162,20 @@ class ExperimentConfig:
     sa_lr: float = 1e-3
     sa_lr_clamp: float = 0.2
 
+    # NVT molecular-dynamics inter-restart relaxation. When enabled, a short
+    # Langevin MD run on the Tersoff PES thermalises the structure after the
+    # unconditional prepass and after each intermediate restart (never after
+    # the final restart). Disabled by default.
+    nvt_md: bool = False
+    nvt_md_temperature: float = 600.0   # K
+    nvt_md_n_steps: int = 1000          # 1 ps at 1 fs
+    nvt_md_timestep: float = 1.0        # fs
+    nvt_md_friction: float = 0.01       # 1/fs
+    # Pre-MD declash + FIRE pre-relax to drain close-contact forces (denoised
+    # structures can collapse atom pairs to sub-Å, overflowing Tersoff to NaN).
+    nvt_md_pre_relax_steps: int = 10
+    nvt_md_declash_d_min: float = 1.5   # Å
+
     # Infrastructure
     accelerator: str = "gpu"
     strategy: str = "ddp_find_unused_parameters_true"

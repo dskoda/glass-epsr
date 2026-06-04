@@ -42,6 +42,34 @@ def test_n_corr_zero_matches_baseline():
     assert torch.allclose(final_a, final_b, atol=0.0, rtol=0.0)
 
 
+def test_loop_keeps_positions_in_cell():
+    """The reverse-SDE loop must keep atoms inside the primitive cell at every
+    step. A constant drift score pushes atoms steadily in +x; without the
+    in-loop wrap they would leave the cell, which silently breaks the ±1-image
+    neighbour enumeration used by every PBC-based guidance/energy term.
+    """
+    diffuser = VarianceExplodingDiffuser(k=0.8)
+    species, pos0, cell = _random_setup(seed=3)
+    L = float(cell[0, 0])
+    ts = torch.linspace(0.5, 1e-3, 64)
+
+    def drift_score(species, pos, cell, t, cutoff):
+        out = torch.zeros_like(pos)
+        out[:, 0] = 5.0  # strong, persistent push along +x
+        return out
+
+    torch.manual_seed(5)
+    _, final = denoise_by_sde(
+        species, pos0.clone(), cell, cutoff=5.0,
+        score_fn=drift_score, likelihood_fn=None, ts=ts, diffuser=diffuser,
+        n_corr=2, corr_step_size=0.15, corr_t_gate=0.6,
+    )
+    # Fractional coordinates must lie within [0, 1) on every periodic axis.
+    frac = final @ torch.linalg.inv(cell)
+    assert torch.isfinite(final).all()
+    assert (frac >= 0.0).all() and (frac < 1.0).all(), frac
+
+
 def test_corrector_produces_finite_positions():
     diffuser = VarianceExplodingDiffuser(k=0.8)
     species, pos0, cell = _random_setup(seed=0)

@@ -217,7 +217,7 @@ def metrics(
             # Print summary
             click.echo(f"  Atoms: {metrics_obj.n_atoms}")
             click.echo(f"  Composition: {metrics_obj.composition}")
-            click.echo(f"  Density: {metrics_obj.density:.4f} atoms/Å³")
+            click.echo(f"  Density: {metrics_obj.density:.4f} atoms/Å³  ({metrics_obj.mass_density:.4f} g/cm³)")
 
             if metrics_obj.pdf.coord_cutoff:
                 click.echo(
@@ -317,7 +317,8 @@ def metrics(
 
             click.echo(f"\n{name}:")
             click.echo(f"  {data['n_atoms']} atoms ({data['composition']})")
-            click.echo(f"  Density: {data['density']:.4f} atoms/Å³")
+            mass_dens = data.get('mass_density', 0.0)
+            click.echo(f"  Density: {data['density']:.4f} atoms/Å³  ({mass_dens:.4f} g/cm³)")
 
             pdf = data.get("pdf", {})
             coord = data.get("coordination", {})

@@ -117,6 +117,7 @@ def load_metrics_from_json(filepath: Union[str, Path], structure_name: str = Non
         composition=data['composition'],
         cell=data['cell'],
         density=data['density'],
+        mass_density=data.get('mass_density', 0.0),
         pdf=pdf,
         adf=adf,
         coordination=coordination,

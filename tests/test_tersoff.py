@@ -136,6 +136,59 @@ def test_translation_invariance():
     assert abs(E1 - E2) < 1e-8
 
 
+def test_energy_invariant_under_unwrapped_drift():
+    """Regression: atoms that have drifted outside the primitive cell by
+    integer lattice vectors must give the same energy and forces as the
+    wrapped structure.
+
+    The reverse-SDE sampler never re-wraps positions, so over many steps
+    atoms diffuse across the periodic boundary and accumulate coordinates
+    several cell-lengths out. build_neighbors only enumerates the ±1 image
+    shells, so before the wrap fix the enumerated pair list collapsed toward
+    empty and energy() returned a spurious ~0 even though the structure was
+    physically unchanged and all coordinates were finite.
+    """
+    atoms = read(DATA_DIR / "Si_2.5_00.xyz")
+    pos, cell, pbc = _atoms_to_tensors(atoms)
+    L = float(cell[0, 0])
+    tc = torch_calc()
+
+    E0, F0 = tc.energy_and_forces_autograd(pos, cell, pbc)
+
+    # Shift each atom by a random integer number of cell vectors (up to ±8):
+    # physically identical structure under PBC, but "unwrapped" coordinates.
+    g = torch.Generator().manual_seed(0)
+    n_cells = torch.randint(-8, 9, pos.shape, generator=g).to(pos.dtype)
+    pos_drift = pos + n_cells * L
+    assert torch.isfinite(pos_drift).all()
+
+    E1, F1 = tc.energy_and_forces_autograd(pos_drift, cell, pbc)
+
+    assert abs(E1.item() - E0.item()) < 1e-8, (E0.item(), E1.item())
+    assert torch.allclose(F1, F0, atol=1e-8), (F1 - F0).abs().max().item()
+    # And the energy must be the real (large, negative) Si energy, not ~0.
+    assert E1.item() < -100.0
+
+
+def test_energy_invariant_under_drift_cell_list():
+    """Same drift invariance, but for a system large enough (N > 256) to
+    trigger the cell-list neighbour path."""
+    atoms = bulk("Si", "diamond", a=5.43).repeat((4, 4, 4))  # 512 atoms
+    pos, cell, pbc = _atoms_to_tensors(atoms)
+    L = float(cell[0, 0])
+    tc = torch_calc()
+
+    E0 = tc.energy(pos, cell, pbc).item()
+
+    g = torch.Generator().manual_seed(1)
+    n_cells = torch.randint(-4, 5, pos.shape, generator=g).to(pos.dtype)
+    pos_drift = pos + n_cells * L
+    E1 = tc.energy(pos_drift, cell, pbc).item()
+
+    assert abs(E1 - E0) < 1e-6, (E0, E1)
+    assert E1 < -100.0
+
+
 def test_neighbor_count_diamond():
     atoms = bulk("Si", "diamond", a=5.43)
     pos, cell, pbc = _atoms_to_tensors(atoms)

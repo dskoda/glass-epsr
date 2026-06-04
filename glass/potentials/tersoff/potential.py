@@ -2,7 +2,7 @@ import math
 
 import torch
 
-from .neighbors import build_neighbors
+from .neighbors import build_neighbors, wrap_positions
 from .params import TersoffParameters
 
 # Matches the guards in ase.calculators.tersoff
@@ -225,6 +225,15 @@ class TorchTersoff:
     ) -> torch.Tensor:
         p = self.params
         cutoff = p.R + p.D
+        # Wrap atoms into the primitive cell first. build_neighbors only
+        # enumerates the ±1 periodic-image shells, which is complete only when
+        # every atom lies inside the cell. The reverse-SDE sampler never
+        # re-wraps its positions, so atoms drift out over many steps and the
+        # pair list collapses toward empty (a spurious zero energy) even
+        # though the structure is physically unchanged. Wrapping is a
+        # gradient-preserving translation by integer lattice vectors, so
+        # forces are unaffected. See neighbors.wrap_positions.
+        positions = wrap_positions(positions, cell, pbc)
         i_idx, j_idx, shift_vec = build_neighbors(positions, cell, pbc, cutoff)
         return self._energy_from_pairs(positions, i_idx, j_idx, shift_vec)
 
@@ -254,6 +263,10 @@ class TorchTersoff:
         pos = positions.to(self.dtype)
         cell_t = cell.to(self.dtype)
 
+        # Wrap into the primitive cell so the ±1-image neighbour enumeration
+        # stays complete even for drifted (unwrapped) inputs. See
+        # neighbors.wrap_positions and the note in `energy`.
+        pos = wrap_positions(pos, cell_t, pbc)
         i_all, j_all, s_all = build_neighbors(pos, cell_t, pbc, cutoff)
         N = pos.shape[0]
         forces = torch.zeros((N, 3), dtype=self.dtype, device=pos.device)

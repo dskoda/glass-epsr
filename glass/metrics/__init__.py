@@ -110,6 +110,9 @@ def compute_all_metrics(
     cell = atoms.cell.cellpar().tolist()  # [a, b, c, alpha, beta, gamma]
     volume = atoms.get_volume()
     density = n_atoms / volume if volume > 0 else 0.0
+    # amu/Å³ → g/cm³: 1 amu/Å³ = 1.66054 g/cm³
+    total_mass = atoms.get_masses().sum()
+    mass_density = (total_mass / volume) * 1.66054 if volume > 0 else 0.0
 
     # Compute PDF (always needed, may be used for auto-cutoff)
     pdf_metrics = compute_pdf(atoms, cutoff=pdf_cutoff)
@@ -160,6 +163,7 @@ def compute_all_metrics(
         composition=composition,
         cell=cell,
         density=density,
+        mass_density=mass_density,
         pdf=pdf_metrics,
         adf=adf_metrics,
         coordination=coord_metrics,

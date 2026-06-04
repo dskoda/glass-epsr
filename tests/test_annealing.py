@@ -7,7 +7,14 @@ import pytest
 import torch
 from ase.build import bulk
 
-from glass.diffusion.annealing import simulated_anneal, make_anneal_fn
+from glass.diffusion.annealing import (
+    simulated_anneal,
+    make_anneal_fn,
+    tersoff_relax,
+    make_relax_fn,
+    nvt_md,
+    make_nvt_md_fn,
+)
 from glass.lit.modules.tersoff_guidance import TersoffEnergyGuidance
 from glass.potentials.tersoff import TersoffParameters, TorchTersoff
 
@@ -109,3 +116,119 @@ def test_make_anneal_fn_signature():
     out = fn(pos, cell, species)
     assert out.shape == pos.shape
     assert torch.isfinite(out).all()
+
+
+def test_tersoff_relax_lowers_energy_on_perturbed_crystal():
+    torch.manual_seed(1)
+    atoms = bulk("Si", "diamond", a=5.43, cubic=True).repeat((2, 2, 2))
+    pos, cell, species = _tensors(atoms)
+    pos_perturbed = pos + 0.1 * torch.randn_like(pos)
+
+    e_before = _energy(pos_perturbed, cell)
+    pos_relaxed = tersoff_relax(pos_perturbed, cell, atoms.numbers, fmax=0.5, max_steps=100)
+    e_after = _energy(pos_relaxed, cell)
+
+    assert e_after < e_before
+    assert pos_relaxed.shape == pos.shape
+    assert torch.isfinite(pos_relaxed).all()
+
+
+def test_tersoff_relax_output_dtype_matches_input():
+    atoms = bulk("Si", "diamond", a=5.43)
+    pos, cell, species = _tensors(atoms, dtype=torch.float32)
+    pos_out = tersoff_relax(pos, cell, atoms.numbers, fmax=1.0, max_steps=5)
+    assert pos_out.dtype == torch.float32
+
+
+def test_make_relax_fn_signature():
+    atoms = bulk("Si", "diamond", a=5.43)
+    pos, cell, species = _tensors(atoms)
+    fn = make_relax_fn(numbers=atoms.numbers, fmax=1.0, max_steps=5)
+    out = fn(pos, cell, species)
+    assert out.shape == pos.shape
+    assert torch.isfinite(out).all()
+
+
+def test_nvt_md_moves_atoms_and_preserves_shape():
+    atoms = bulk("Si", "diamond", a=5.43, cubic=True).repeat((2, 2, 2))
+    pos, cell, species = _tensors(atoms)
+    pos_out = nvt_md(
+        pos, cell, atoms.numbers,
+        temperature=600.0, n_steps=20, timestep=1.0, friction=0.01, seed=0,
+    )
+    assert pos_out.shape == pos.shape
+    assert torch.isfinite(pos_out).all()
+    # Finite-temperature MD should displace atoms from the input.
+    assert not torch.allclose(pos_out, pos, atol=1e-6)
+
+
+def test_nvt_md_output_dtype_matches_input():
+    atoms = bulk("Si", "diamond", a=5.43)
+    pos, cell, species = _tensors(atoms, dtype=torch.float32)
+    pos_out = nvt_md(pos, cell, atoms.numbers, n_steps=5, seed=1)
+    assert pos_out.dtype == torch.float32
+
+
+def test_nvt_md_zero_steps_is_identity():
+    atoms = bulk("Si", "diamond", a=5.43)
+    pos, cell, species = _tensors(atoms)
+    pos_out = nvt_md(pos, cell, atoms.numbers, n_steps=0)
+    assert torch.equal(pos, pos_out)
+
+
+def test_make_nvt_md_fn_signature():
+    atoms = bulk("Si", "diamond", a=5.43)
+    pos, cell, species = _tensors(atoms)
+    fn = make_nvt_md_fn(numbers=atoms.numbers, n_steps=5, seed=0)
+    out = fn(pos, cell, species)
+    assert out.shape == pos.shape
+    assert torch.isfinite(out).all()
+
+
+def test_nvt_md_pre_relax_tames_close_contact():
+    # Inject a near-coincident pair (sub-Å) whose Tersoff energy overflows to a
+    # non-finite force — FIRE alone cannot recover. The geometric declash inside
+    # the pre-relax must separate the pair so the subsequent MD stays finite.
+    torch.manual_seed(0)
+    atoms = bulk("Si", "diamond", a=5.43, cubic=True).repeat((2, 2, 2))
+    pos, cell, species = _tensors(atoms)
+    pos = pos.clone()
+    pos[1] = pos[0] + 0.2  # ~0.35 Å contact -> inf/NaN Tersoff force
+
+    out = nvt_md(
+        pos, cell, atoms.numbers,
+        temperature=600.0, n_steps=50, timestep=1.0,
+        pre_relax_steps=10, declash_d_min=1.5, seed=0,
+    )
+    assert torch.isfinite(out).all()
+
+
+def test_declash_separates_coincident_pair():
+    from glass.diffusion.annealing import _declash_atoms
+    import ase
+
+    atoms = bulk("Si", "diamond", a=5.43, cubic=True).repeat((2, 2, 2))
+    pos = atoms.get_positions().copy()
+    pos[1] = pos[0] + 0.2  # ~0.35 Å contact
+    work = ase.Atoms(numbers=atoms.numbers, positions=pos, cell=atoms.cell, pbc=True)
+    _declash_atoms(work, d_min=1.5)
+    d = work.get_all_distances(mic=True)
+    np.fill_diagonal(d, 9.0)
+    assert d.min() >= 1.5 - 1e-6
+
+
+def test_nvt_md_progress_fn_is_called():
+    atoms = bulk("Si", "diamond", a=5.43)
+    pos, cell, species = _tensors(atoms)
+    calls = []
+
+    def cb(step, T):
+        calls.append((step, T))
+
+    nvt_md(
+        pos, cell, atoms.numbers, n_steps=10, seed=0,
+        progress_fn=cb, progress_interval=1, pre_relax_steps=0,
+    )
+    # One report per step (ASE fires the attach at step 0 too).
+    assert len(calls) >= 10
+    assert calls[-1][0] >= 10
